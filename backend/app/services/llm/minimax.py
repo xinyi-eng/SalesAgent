@@ -42,7 +42,8 @@ class MiniMaxService:
         speed: float = 1.0,
         volume: float = 1.0,
         pitch: float = 1.0,
-        format: str = "mp3"
+        format: str = "mp3",
+        emotion: str = "neutral"
     ) -> bytes:
         """
         Convert text to speech.
@@ -55,6 +56,7 @@ class MiniMaxService:
             volume: Volume (0-1)
             pitch: Pitch (0.5-2.0)
             format: Output format (mp3/wav/flac)
+            emotion: Speech emotion (neutral, happy, sad, angry, fearful, disgusted, surprised)
 
         Returns:
             Audio bytes
@@ -79,7 +81,8 @@ class MiniMaxService:
                         "voice_id": voice,
                         "speed": int(speed),
                         "vol": int(volume),
-                        "pitch": int(pitch)
+                        "pitch": int(pitch),
+                        "emotion": emotion
                     },
                     "audio_setting": {
                         "sample_rate": 32000,

@@ -2,11 +2,91 @@
 对话处理器 - 集成知识服务的Agentic RAG对话处理
 """
 import json
+import re
 from typing import Optional, List, Dict, Any
 from app.services.llm.minimax import get_minimax_service
 from app.services.knowledge.service import get_knowledge_service
 from app.services.knowledge.tools import CUSTOMER_PROFILES
 from app.websocket.manager import session_manager
+
+
+# 情感定义 - 对应MiniMax TTS的emotion参数
+EMOTIONS = ["neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised"]
+
+# 情感触发关键词
+EMOTION_TRIGGERS = {
+    "happy": [
+        "太好了", "很棒", "不错", "挺好的", "满意", "谢谢", "好的", "行", "没问题",
+        "有意思", "有趣", "惊讶", "真的吗", "厉害", "佩服", "点赞"
+    ],
+    "sad": [
+        "可惜", "遗憾", "无奈", "难过", "失望", "沮丧", "郁闷", "烦恼", "忧愁"
+    ],
+    "angry": [
+        "太贵", "不合理", "骗子", "垃圾", "很差", "不满", "投诉", "怎么这样",
+        "不负责任", "敷衍", "失望透顶", "气愤", "愤怒"
+    ],
+    "fearful": [
+        "担心", "害怕", "顾虑", "忧虑", "不安", "风险", "危险", "怕出问题", "万一"
+    ],
+    "disgusted": [
+        "恶心", "讨厌", "反感", "厌恶", "鄙视", "不屑", "看不上", "low", "差劲"
+    ],
+    "surprised": [
+        "没想到", "居然", "竟然", "惊讶", "吃惊", "震惊", "什么", "怎么", "为什么",
+        "这也太", "不会吧", "真的假的", "简直"
+    ]
+}
+
+
+def detect_emotion(user_message: str, customer_type: str = "assertive") -> str:
+    """
+    根据用户消息内容和客户类型检测AI客户应有的情感
+
+    Args:
+        user_message: 用户（销售）的最新消息
+        customer_type: 客户画像类型
+
+    Returns:
+        情感状态字符串 (neutral, happy, sad, angry, fearful, disgusted, surprised)
+    """
+    if not user_message:
+        return "neutral"
+
+    msg_lower = user_message.lower()
+
+    # 统计各情感关键词匹配数量
+    emotion_scores = {e: 0 for e in EMOTIONS if e != "neutral"}
+
+    for emotion, keywords in EMOTION_TRIGGERS.items():
+        for keyword in keywords:
+            if keyword in msg_lower:
+                emotion_scores[emotion] += 1
+
+    # 客户类型影响基础情感倾向
+    type_bonus = {
+        "assertive": {"angry": 1, "surprised": 1},  # 主导型更容易质疑
+        "analytical": {"neutral": 1},  # 理性型更冷静
+        "amiable": {"happy": 1, "sad": 1},  # 友善型情绪更外露
+        "expressive": {"surprised": 2, "happy": 1},  # 表达型情绪化
+    }
+
+    for t, bonuses in type_bonus.items():
+        if t in customer_type.lower():
+            for e, bonus in bonuses.items():
+                emotion_scores[e] += bonus
+
+    # 找出得分最高的情感
+    max_score = max(emotion_scores.values())
+    if max_score == 0:
+        return "neutral"
+
+    # 返回得分最高的情感
+    for emotion, score in emotion_scores.items():
+        if score == max_score:
+            return emotion
+
+    return "neutral"
 
 
 class ConversationHandler:
@@ -104,16 +184,19 @@ class ConversationHandler:
         # 1. 构建消息列表
         messages = self._build_messages(user_message, conversation_history, customer_type, scenario)
 
-        # 2. 获取工具定义
+        # 2. 检测用户情感（基于销售说的话）
+        emotion = detect_emotion(user_message, customer_type)
+
+        # 3. 获取工具定义
         tools = self.knowledge.get_tool_definitions()
 
-        # 3. 调用LLM（包含工具）
+        # 4. 调用LLM（包含工具）
         response_text = await self.llm.chat(
             messages=messages,
             tools=tools
         )
 
-        # 4. 检查是否触发了function calling
+        # 5. 检查是否触发了function calling
         tool_calls_result = None
         knowledge_used = []
 
@@ -122,10 +205,10 @@ class ConversationHandler:
             if response_data.get("type") == "function_call":
                 tool_calls = response_data.get("tool_calls", [])
 
-                # 5. 执行工具调用
+                # 6. 执行工具调用
                 tool_results = self.knowledge.process_tool_calls(tool_calls)
 
-                # 6. 收集知识使用情况
+                # 7. 收集知识使用情况
                 for tr in tool_results:
                     if tr["success"]:
                         knowledge_used.append(tr["tool_name"])
@@ -135,13 +218,14 @@ class ConversationHandler:
                             "content": f"[TOOL RESULT: {tr['tool_name']}]\n{tr['formatted_result']}"
                         })
 
-                # 7. 用工具结果再次调用LLM生成最终回复
+                # 8. 用工具结果再次调用LLM生成最终回复
                 if tool_results:
                     final_response = await self.llm.chat(messages=messages, tools=tools)
                     return {
                         "response": final_response,
                         "tool_calls": tool_results,
-                        "knowledge_used": knowledge_used
+                        "knowledge_used": knowledge_used,
+                        "emotion": emotion
                     }
 
         except json.JSONDecodeError:
@@ -151,7 +235,8 @@ class ConversationHandler:
         return {
             "response": response_text,
             "tool_calls": tool_calls_result or [],
-            "knowledge_used": knowledge_used
+            "knowledge_used": knowledge_used,
+            "emotion": emotion
         }
 
     def _build_messages(

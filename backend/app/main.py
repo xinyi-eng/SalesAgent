@@ -108,13 +108,13 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
         """Send audio chunk to client as binary"""
         await websocket.send_bytes(chunk)
 
-    async def send_ai_audio(text: str):
+    async def send_ai_audio(text: str, emotion: str = "neutral"):
         """Generate TTS audio for AI response and send to client"""
         nonlocal is_streaming_audio
         try:
             is_streaming_audio = True
 
-            # Generate TTS audio
+            # Generate TTS audio with emotion
             audio_bytes = await minimax.text_to_speech(
                 text=text,
                 model="speech-2.8-hd",
@@ -122,7 +122,8 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
                 speed=1.0,
                 volume=1.0,
                 pitch=1.0,
-                format="mp3"
+                format="mp3",
+                emotion=emotion
             )
 
             # Send audio as binary
@@ -252,7 +253,8 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
 
                     # Send TTS audio to client (blocking to ensure delivery)
                     try:
-                        await send_ai_audio(clean_response)
+                        emotion = result.get("emotion", "neutral")
+                        await send_ai_audio(clean_response, emotion)
                     except Exception as e:
                         print(f"[DEBUG] Failed to send TTS: {e}")
                 else:
