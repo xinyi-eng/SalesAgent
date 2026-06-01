@@ -12,6 +12,7 @@ import { LoginPage, RegisterPage } from './pages/Auth'
 import { ProfilePage, HistoryPage, SettingsPage } from './pages/User'
 import { DashboardPage } from './pages/Dashboard'
 import { KnowledgeBasePage } from './pages/Knowledge'
+import SpinPreparationPage from './pages/Spin/SpinPreparationPage'
 import { AuthProvider } from './contexts/AuthContext'
 import ProtectedRoute from './components/common/ProtectedRoute'
 
@@ -26,6 +27,7 @@ function App() {
 
           {/* Protected routes */}
           <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+          <Route path="/spin/preparation" element={<ProtectedRoute><SpinPreparationPage /></ProtectedRoute>} />
           <Route path="/practice" element={<ProtectedRoute><PracticePage /></ProtectedRoute>} />
           <Route path="/practice/chat" element={<ProtectedRoute><PracticeChatPage /></ProtectedRoute>} />
           <Route path="/practice/review" element={<ProtectedRoute><PracticeReviewPage /></ProtectedRoute>} />
