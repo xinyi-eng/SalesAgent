@@ -1,0 +1,50 @@
+# Database
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
+nul
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+
+# Node
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Project specific
+_bmad/
+_bmad-output/
+SalesAgent/
+models/
+原始数据/
+开发文档/
+面试问题/
+
+# Env files except example
+.env
+.env.local
+.env.*.local
+
+# ChromaDB data
+backend/data/
