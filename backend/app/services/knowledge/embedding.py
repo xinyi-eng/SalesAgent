@@ -6,6 +6,59 @@ from typing import List, Optional
 from abc import ABC, abstractmethod
 
 
+class _BGEMeanPoolModel:
+    """
+    Lightweight BGE embedder using transformers + manual mean pooling.
+
+    BAAI/bge-base-zh-v1.5 is just a BERT encoder with:
+      - mean pooling (attention-mask weighted)
+      - L2 normalization
+    This sidesteps sentence_transformers' CrossEncoder/PreTrainedModel
+    import chain which breaks on Windows when torchvision is missing
+    or version-mismatched.
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-base-zh-v1.5"):
+        import torch
+        from transformers import AutoTokenizer, AutoModel
+
+        cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache)
+        # Force safetensors loader: pytorch_model.bin requires torch>=2.6
+        # due to a CVE restriction in transformers 4.57+. BGE ships both,
+        # so safetensors is the path of least resistance on this env.
+        self.model = AutoModel.from_pretrained(
+            model_name, cache_dir=cache, use_safetensors=True
+        )
+        self.model.eval()
+        self.dim = int(self.model.config.hidden_size)
+
+    def _mean_pool(self, last_hidden, attention_mask):
+        import torch
+        mask = attention_mask.unsqueeze(-1).float()
+        summed = (last_hidden * mask).sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1e-9)
+        return summed / counts
+
+    def _embed_one(self, text: str) -> List[float]:
+        import torch
+        with torch.no_grad():
+            encoded = self.tokenizer(
+                [text], padding=True, truncation=True, max_length=512, return_tensors="pt"
+            )
+            out = self.model(**encoded)
+            pooled = self._mean_pool(out.last_hidden_state, encoded["attention_mask"])
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        return pooled[0].cpu().tolist()
+
+    def encode(self, texts) -> List[List[float]]:
+        """Mimic sentence_transformers.encode() for drop-in compat."""
+        return [self._embed_one(t) for t in texts]
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return self.dim
+
+
 class EmbeddingModel(ABC):
     """Embedding模型抽象基类"""
 
@@ -161,19 +214,30 @@ class ChineseEmbeddingModel(EmbeddingModel):
     离线时使用 HashEmbeddingModel 作为后备
     """
 
-    def __init__(self, model_name: str = "text2vec-base-chinese"):
+    def __init__(self, model_name: str = "BAAI/bge-base-zh-v1.5"):
         self.model_name = model_name
         self._model = None
         self._is_loaded = False
         # 环境变量控制是否离线模式
+        # Default: BGE 已经在本地缓存（HF_ENDPOINT=https://hf-mirror.com），
+        # 走在线模式。如果 chromadb 已有数据但模型没下，可以临时
+        # 设 EMBEDDING_OFFLINE=true 跳过下载。
         self._offline = os.getenv("EMBEDDING_OFFLINE", "false").lower() == "true"
         # 本地模型路径（如果有的话）
         self._local_model_path = os.getenv("EMBEDDING_MODEL_PATH", None)
+        # HF 镜像（中国大陆常用 hf-mirror.com 解决 SSL/访问问题）
+        self._hf_endpoint = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")
         # Hash embedding后备
         self._hash_embedding = HashEmbeddingModel(dimension=768)
 
     def _load_model(self):
-        """懒加载模型"""
+        """懒加载模型
+
+        优先用 sentence_transformers（封装的 mean pooling + 归一化）。
+        如果它在 Windows 上因为 torchvision / transformers 版本不匹配
+        失败，回退到 transformers + 手写 mean pooling —— BGE 本质就是
+        BERT + masked mean pooling + L2 norm，几十行就能写完。
+        """
         if self._is_loaded:
             return
 
@@ -182,22 +246,41 @@ class ChineseEmbeddingModel(EmbeddingModel):
             self._is_loaded = True
             return
 
+        # Windows 上 PyTorch 原生库不在 PATH 上，先补上
+        try:
+            import torch, os.path as _p
+            torch_lib = _p.join(_p.dirname(torch.__file__), "lib")
+            if _p.isdir(torch_lib):
+                if hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(torch_lib)
+                os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
+        except Exception:
+            pass
+
+        os.environ.setdefault("HF_ENDPOINT", self._hf_endpoint)
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
+        # 路径 1：sentence_transformers（封装好 mean pooling）
         try:
             from sentence_transformers import SentenceTransformer
-            import os
-
-            if self._local_model_path and os.path.exists(self._local_model_path):
-                # 使用本地模型路径
-                print(f"Loading embedding model from local path: {self._local_model_path}")
-                self._model = SentenceTransformer(self._local_model_path)
-            else:
-                # 设置本地缓存路径，避免每次都从 huggingface 下载
-                cache_folder = os.path.join(os.path.expanduser("~"), ".cache", "sentence_transformers")
-                self._model = SentenceTransformer(self.model_name, cache_folder=cache_folder)
+            cache_folder = os.path.join(os.path.expanduser("~"), ".cache", "sentence_transformers")
+            print(f"Loading embedding model (sentence_transformers): {self.model_name}")
+            self._model = SentenceTransformer(self.model_name, cache_folder=cache_folder)
+            print(f"[OK] Loaded BGE via sentence_transformers (dim={self._model.get_sentence_embedding_dimension()})")
             self._is_loaded = True
-            print(f"Loaded Chinese embedding model: {self.model_name}")
+            return
         except Exception as e:
-            print(f"Failed to load Chinese embedding model: {e}, using hash embedding")
+            print(f"[WARN] sentence_transformers load failed: {e}, falling back to transformers+mean-pooling")
+
+        # 路径 2：transformers AutoModel + 手写 mean pooling
+        try:
+            self._model = _BGEMeanPoolModel(self.model_name)
+            print(f"[OK] Loaded BGE via transformers+mean-pooling (dim={self._model.dim})")
+            self._is_loaded = True
+        except Exception as e:
+            print(f"[FAIL] Failed to load Chinese embedding model: {e}")
+            print(f"  Falling back to hash embeddings.")
             self._is_loaded = True
 
     def embed(self, texts: List[str]) -> List[List[float]]:
@@ -207,7 +290,13 @@ class ChineseEmbeddingModel(EmbeddingModel):
         if self._model is None:
             return self._hash_embedding.embed(texts)
 
-        return self._model.encode(texts).tolist()
+        out = self._model.encode(texts)
+        # SentenceTransformer returns a numpy array; _BGEMeanPoolModel
+        # returns a Python list. Coerce both to a list-of-list-of-floats.
+        try:
+            return out.tolist()  # numpy / tensor
+        except AttributeError:
+            return [list(v) for v in out]  # already python list
 
     def embed_query(self, query: str) -> List[float]:
         """单个查询向量化"""

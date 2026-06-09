@@ -1244,15 +1244,36 @@ def _do_search_knowledge(query: str, category: str, top_k: int) -> str:
         chunks = loader.search_knowledge(query, category=category if category != "all" else None, top_k=top_k)
 
         results = []
+        seen_keys = set()
         for chunk in chunks:
+            # Filter out clearly-irrelevant content: name lists, table of
+            # contents, indexes, etc. These are usually returned when the
+            # query is generic and the vector store has no real semantic
+            # match.
+            chapter = (chunk.chapter or "")
+            section = (chunk.section or "")
+            text = chunk.text or ""
+            noisy = ("人名" in chapter + section or "公司名" in chapter + section or
+                     "目录" in chapter or "index" in chapter.lower())
+            list_heavy = (text.count("·") >= 5 or text.count(",") >= 8 or
+                           text.count("<") >= 4 or text.count("\n") >= 6)
+            if noisy or list_heavy:
+                continue
+            # De-dup by (source, chapter, section) at this level too
+            key = (chunk.source, chapter, section)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             results.append({
                 "category": chunk.category,
                 "source": chunk.source,
-                "content": [chunk.text[:500]] if len(chunk.text) > 500 else [chunk.text],
-                "chapter": chunk.chapter,
-                "section": chunk.section,
-                "relevance": 0.8  # 向量搜索返回的是相似度，这里简化处理
+                "content": [text[:500]] if len(text) > 500 else [text],
+                "chapter": chapter,
+                "section": section,
+                "relevance": 0.8
             })
+            if len(results) >= top_k:
+                break
 
         if results:
             return json.dumps({
@@ -1266,42 +1287,61 @@ def _do_search_knowledge(query: str, category: str, top_k: int) -> str:
     except Exception as e:
         print(f"Vector search failed: {e}, using keyword fallback")
 
-    # 回退到内置关键词搜索
+    # 回退到内置关键词搜索（仅当 query 与对应内容真正相关时返回）
     results = []
+    query_lower = (query or "").lower()
+    keywords = [w for w in query_lower.split() if len(w) >= 2]  # ignore single chars
+
+    def _has_keyword_overlap(text: str) -> bool:
+        if not keywords:
+            return False
+        return any(k in text for k in keywords)
 
     if category in ["framework", "all"]:
         for stage, texts in SPIN_KNOWLEDGE.items():
-            if query.lower() in " ".join(texts).lower() or stage in query.lower():
-                results.append({
-                    "category": "framework",
-                    "source": "SPIN销售巨人",
-                    "content": texts[:2],
-                    "relevance": 0.9
-                })
+            stage_match = stage in query_lower or (stage == "need_payoff" and "需求" in query)
+            spin_keywords = ("spin", "spin's", "背景", "难点", "暗示", "需求-效益", "提问", "话术")
+            query_about_spin = any(k in query_lower for k in spin_keywords)
+            if not (stage_match or query_about_spin):
+                continue
+            joined = " ".join(texts)
+            if not _has_keyword_overlap(joined):
+                continue
+            results.append({
+                "category": "framework",
+                "source": "SPIN销售巨人",
+                "content": texts[:2],
+                "chapter": f"SPIN-{stage}",
+                "relevance": 0.9
+            })
 
     if category in ["objection", "all"]:
         for obj_type, handlers in OBJECTION_HANDLING.items():
-            if obj_type in query.lower():
+            if obj_type in query_lower or _has_keyword_overlap(obj_type + " " + " ".join(h.get("trigger", "") for h in handlers)):
+                templates = [h["template"] for h in handlers if h.get("template")][:2]
                 results.append({
                     "category": "objection",
                     "source": "异议处理库",
-                    "content": [h["template"] for h in handlers],
+                    "content": templates,
+                    "chapter": f"异议处理-{obj_type}",
                     "relevance": 0.9
                 })
 
     if category in ["script", "all"]:
-        if "开场" in query or "opening" in query.lower():
+        if any(k in query for k in ["开场", "开场白", "opening", "第一次", "初次拜访"]):
             results.append({
                 "category": "script",
-                "source": "话术库",
+                "source": "话术库-开场白",
                 "content": OPENING_SCRIPTS,
+                "chapter": "开场白",
                 "relevance": 0.8
             })
-        if "缔结" in query or "closing" in query.lower():
+        if any(k in query for k in ["缔结", "closing", "成交", "签约"]):
             results.append({
                 "category": "script",
-                "source": "话术库",
+                "source": "话术库-缔结",
                 "content": CLOSING_SCRIPTS,
+                "chapter": "缔结话术",
                 "relevance": 0.8
             })
 
@@ -1313,11 +1353,38 @@ def _do_search_knowledge(query: str, category: str, top_k: int) -> str:
             "relevance": 0.3
         })
 
+    # De-duplicate: same (source, chapter, section) often appears multiple
+    # times in the vector-store results. Keep the first one with the longest
+    # content.
+    seen = {}
+    for r in results:
+        key = (r.get("source", ""), r.get("chapter", ""), r.get("section", ""))
+        prev = seen.get(key)
+        if prev is None:
+            seen[key] = r
+        else:
+            # Replace if this one has longer content
+            prev_len = sum(len(c) for c in prev.get("content", []))
+            this_len = sum(len(c) for c in r.get("content", []))
+            if this_len > prev_len:
+                seen[key] = r
+    deduped = list(seen.values())[:top_k]
+    # If dedup shrank below top_k, top up from the original results
+    if len(deduped) < min(top_k, len(results)):
+        seen_keys = set((r.get("source", ""), r.get("chapter", ""), r.get("section", "")) for r in deduped)
+        for r in results:
+            k = (r.get("source", ""), r.get("chapter", ""), r.get("section", ""))
+            if k not in seen_keys:
+                deduped.append(r)
+                seen_keys.add(k)
+            if len(deduped) >= top_k:
+                break
+
     return json.dumps({
         "query": query,
         "category": category,
-        "results": results[:top_k],
-        "total": len(results),
+        "results": deduped,
+        "total": len(deduped),
         "tip": "检索到的知识应该作为LLM生成回复的参考，不要直接朗读，要自然融入对话。"
     }, ensure_ascii=False)
 

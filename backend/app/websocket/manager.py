@@ -29,15 +29,43 @@ class ConnectionManager:
         self.session_states: Dict[str, ConversationState] = {}
 
     async def connect(self, websocket: WebSocket, session_id: str):
-        """Accept a new WebSocket connection"""
+        """Accept a new WebSocket connection.
+
+        If there's already a live connection for this session (browser
+        reload, React strict mode, hot-reload), close it first so its
+        receive loop dies. Otherwise the old loop will keep reading from
+        a dead socket and the new tab's messages will be dropped.
+        """
+        import sys
+        print(f"[WS MGR] connect() called for session {session_id}", flush=True)
+        sys.stdout.flush()
+
+        # 1. Accept the NEW connection first (must happen before any
+        #    send/recv on it).
         await websocket.accept()
+
+        # 2. If an old connection exists for this session, close it.
+        old_ws = self.active_connections.get(session_id)
+        if old_ws is not None and old_ws is not websocket:
+            try:
+                await old_ws.close(code=1000, reason="Replaced by new connection")
+            except Exception:
+                pass
+            # Drop the reverse-map entry for the old socket
+            self.connection_sessions.pop(old_ws, None)
+
+        # 3. Register the new connection
         self.active_connections[session_id] = websocket
         self.connection_sessions[websocket] = session_id
         self.session_states[session_id] = ConversationState.IDLE
+        print(f"[WS MGR] accept() done for session {session_id}", flush=True)
 
     def disconnect(self, websocket: WebSocket):
         """Remove a WebSocket connection"""
+        import sys
         session_id = self.connection_sessions.pop(websocket, None)
+        print(f"[WS MGR] disconnect() called for session {session_id}", flush=True)
+        sys.stdout.flush()
         if session_id:
             self.active_connections.pop(session_id, None)
             self.session_states.pop(session_id, None)
@@ -46,24 +74,38 @@ class ConnectionManager:
         """Send a message to a specific session"""
         websocket = self.active_connections.get(session_id)
         if websocket:
-            await websocket.send_json(message)
+            try:
+                await websocket.send_json(message)
+                return True
+            except Exception:
+                # Client disconnected - remove from active connections
+                self.active_connections.pop(session_id, None)
+                return False
+        return False
 
     async def send_audio_chunk(self, session_id: str, chunk: bytes):
         """Send binary audio chunk to client"""
         websocket = self.active_connections.get(session_id)
         if websocket:
-            await websocket.send_bytes(chunk)
+            try:
+                await websocket.send_bytes(chunk)
+            except Exception:
+                self.active_connections.pop(session_id, None)
 
     async def send_status(self, session_id: str, state: ConversationState, metadata: dict = None):
         """Send state update to client"""
         websocket = self.active_connections.get(session_id)
         if websocket:
-            await websocket.send_json({
-                "type": "status_update",
-                "state": state.value,
-                "timestamp": datetime.utcnow().isoformat(),
-                "metadata": metadata or {}
-            })
+            try:
+                await websocket.send_json({
+                    "type": "status_update",
+                    "state": state.value,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "metadata": metadata or {}
+                })
+            except Exception:
+                # Client disconnected or send failed - ignore
+                pass
         self.session_states[session_id] = state
 
     async def broadcast(self, session_id: str, message: dict):
@@ -92,12 +134,23 @@ class PracticeSessionManager:
         # Session state storage (in production, use Redis)
         self.sessions: Dict[str, dict] = {}
 
-    def create_session(self, session_id: str, scenario_id: str, role_config: dict):
+    def create_session(
+        self,
+        session_id: str,
+        scenario_id: str,
+        role_config: dict,
+        customer_context: dict = None,
+        investigation_result: dict = None,
+        user_context: dict = None,
+    ):
         """Create a new practice session state"""
         self.sessions[session_id] = {
             "id": session_id,
             "scenario_id": scenario_id,
             "role_config": role_config,
+            "customer_context": customer_context,
+            "investigation_result": investigation_result,
+            "user_context": user_context,
             "message_count": 0,
             "last_activity": datetime.utcnow().isoformat(),
             "context": [],
@@ -157,6 +210,11 @@ class PracticeSessionManager:
         if session_id in self.sessions:
             return self.sessions[session_id].get("current_phase", "opening")
         return "opening"
+
+    def update_session_field(self, session_id: str, field: str, value):
+        """Update a custom field on a session"""
+        if session_id in self.sessions:
+            self.sessions[session_id][field] = value
 
     def end_session(self, session_id: str):
         """End a practice session"""

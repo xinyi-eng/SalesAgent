@@ -31,6 +31,37 @@ class DocumentProcessor:
         self.chunk_size = chunk_size
         self.overlap = overlap
 
+    # 章节/标题里包含这些关键词的，直接当成出版社前言/广告/版权
+    # 页丢掉 —— 它们稀释了 RAG 搜索的语义相关度。
+    _FRONT_MATTER_KEYWORDS = [
+        'piloting', 'pilot marketing', 'idea-treasury',  # 派力营销书系
+        '爱生活', '爱营销', '微信公众平台', 'aiyingxiao',
+        '派力', '派力观点', '派力观点：', '派力公司的咨询顾问',
+        '北京派力', '北京泛利', '北京朝外', '010-',
+        '继续推荐', '十大经典', '传播专业营销',
+        '图书在版编目', 'cip数据', 'cip 数据',
+        'isbn', '标准书号', '责任编辑', 'author：', '出版社',
+        '邮 编：', '邮编：', '电 话：', '电话：', '传 真：', '传真：',
+        'address', '地址：', '地址:',
+        '©copyright', '© copyright', 'all rights reserved',
+        'foreword', '序言', '译者序', '译序',
+    ]
+
+    def _is_front_matter(self, chapter: str, text: str) -> bool:
+        """判断一个章节是不是前言/版权页/广告 — 那种别索引的内容。"""
+        # 优先看 chapter（标题）里是否命中关键词
+        chapter_norm = chapter.lower().strip()
+        for kw in self._FRONT_MATTER_KEYWORDS:
+            if kw.lower() in chapter_norm:
+                return True
+        # 标题为空且前 200 字符密度高命中 → 整段是 noise
+        head = text[:200].lower()
+        if not chapter.strip():
+            hits = sum(1 for kw in self._FRONT_MATTER_KEYWORDS if kw.lower() in head)
+            if hits >= 2:
+                return True
+        return False
+
     def process_markdown(self, md_path: str, book_name: str) -> List[TextChunk]:
         """
         处理Markdown文件，提取文本块
@@ -61,8 +92,14 @@ class DocumentProcessor:
             if not section.get('text', '').strip():
                 continue
 
-            # 对每个章节进行分块
+            # 过滤前言/版权页/出版社广告
+            chapter = section.get('chapter', '')
             text = section['text'].strip()
+            if self._is_front_matter(chapter, text):
+                continue
+
+            # 对每个章节进行分块
+            text = text
 
             # 如果文本太长，先按段落分割
             if len(text) > 10000:
@@ -148,6 +185,9 @@ class DocumentProcessor:
 
             # 移除行内图片
             line = re.sub(r'!\[.*?\]\(.*?\)', '', line)
+
+            # 移除残留的 HTML 标签（PDF 抽取常见）
+            line = re.sub(r'<[^>]+>', ' ', line)
 
             # 跳过空白元行
             if not line.strip():

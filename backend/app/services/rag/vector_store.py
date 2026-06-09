@@ -1,9 +1,20 @@
 """
-Vector Store - Store and search embeddings in Milvus or in-memory fallback
+Vector Store - Store and search embeddings in ChromaDB.
+
+NOTE: Used to support Milvus or in-memory fallback. Both modes
+required re-embedding all 10k chunks on every server restart, and
+Milvus wasn't actually running. The collection is now a thin wrapper
+around the persisted ChromaDB collection used by the chat flow
+(`app.services.knowledge.vector_store_chroma`), so:
+
+  - Embeddings are stored on disk across restarts
+  - The same BGE vectors are reused by both /api/v1/knowledge/search
+    and the chat conversation handler
+  - Top-k search returns the same chunks the chat sees
 """
 import os
 import json
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
@@ -28,8 +39,9 @@ class VectorChunk:
 
 class VectorStore:
     """
-    Vector store supporting Milvus or in-memory fallback.
-    For production, use Milvus. For development, use in-memory.
+    Wrapper around the project-wide ChromaDB collection. Kept the
+    same interface as before (Milvus/in-memory) so callers don't need
+    to change.
     """
 
     def __init__(
@@ -37,109 +49,66 @@ class VectorStore:
         use_milvus: bool = False,
         milvus_host: str = "localhost",
         milvus_port: int = 19530,
-        collection_name: str = "salesagent_knowledge"
+        collection_name: str = "sales_knowledge"
     ):
-        """
-        Initialize VectorStore.
-
-        Args:
-            use_milvus: Whether to use Milvus (requires running Milvus)
-            milvus_host: Milvus server host
-            milvus_port: Milvus server port
-            collection_name: Name of the collection
-        """
-        self.use_milvus = use_milvus
-        self.milvus_host = milvus_host
-        self.milvus_port = milvus_port
+        # We always go to ChromaDB now — Milvus path is kept only to
+        # avoid breaking old call sites.
+        self.use_milvus = False
         self.collection_name = collection_name
-        self._milvus_client = None
+        self._chroma = None  # Lazy: chromadb.PersistentClient
         self._collection = None
 
-        # In-memory fallback store
-        self._memory_store: Dict[str, VectorChunk] = {}
-        self._memory_vectors: List[List[float]] = []
-        self._memory_ids: List[str] = []
-
-        if use_milvus:
-            self._init_milvus()
-
-    def _init_milvus(self):
-        """Initialize Milvus connection."""
+    def _connect(self):
+        if self._collection is not None:
+            return
+        # 直接创建 chromadb.PersistentClient，不绕道 knowledge 栈。
+        # 用 get_collection（不是 get_or_create），避免因为 metadata
+        # 不匹配而被自动创建一个空的同名 collection。
+        import chromadb
+        import os.path as _p
+        data_dir = _p.abspath(_p.join(_p.dirname(__file__), "..", "..", "..", "data", "chroma"))
+        os.makedirs(data_dir, exist_ok=True)
+        self._chroma = chromadb.PersistentClient(path=data_dir)
         try:
-            from pymilvus import MilvusClient
-            self._milvus_client = MilvusClient(
-                uri=f"http://{self.milvus_host}:{self.milvus_port}"
+            self._collection = self._chroma.get_collection(self.collection_name)
+        except Exception:
+            # 第一次启动 / collection 还没建 — 创建
+            self._collection = self._chroma.get_or_create_collection(
+                name=self.collection_name,
+                metadata={"description": "Sales Agent Knowledge Base"}
             )
-            # Try to connect and create collection
-            if not self._milvus_client.has_collection(self.collection_name):
-                self._milvus_client.create_collection(
-                    collection_name=self.collection_name,
-                    dimension=384,  # Match embedding dimension
-                    primary_field="id",
-                    vector_field="embedding"
-                )
-            self._collection = self._milvus_client
-            print(f"Connected to Milvus at {self.milvus_host}:{self.milvus_port}")
-        except ImportError:
-            print("pymilvus not installed, falling back to in-memory store")
-            self.use_milvus = False
-        except Exception as e:
-            print(f"Failed to connect to Milvus: {e}, falling back to in-memory store")
-            self.use_milvus = False
 
     def add_chunks(self, chunks: List[Dict]) -> int:
         """
-        Add chunks to the vector store.
-
-        Args:
-            chunks: List of chunk dicts with 'id', 'text', 'embedding', 'source', 'metadata'
-
-        Returns:
-            Number of chunks added
+        Add chunks to ChromaDB. Re-uses the BGE-backed add_chunks from
+        the knowledge stack so we get batching + dedup for free.
         """
-        if self.use_milvus:
-            return self._add_chunks_milvus(chunks)
-        else:
-            return self._add_chunks_memory(chunks)
+        from app.services.knowledge.vector_store_chroma import ChromaVectorStore
+        from app.services.knowledge.document_processor import TextChunk
 
-    def _add_chunks_milvus(self, chunks: List[Dict]) -> int:
-        """Add chunks to Milvus."""
-        if not self._milvus_client:
-            return 0
+        self._connect()
+        # Convert dicts → TextChunk so we can call the existing
+        # add_chunks which handles BGE embedding + batch split.
+        chroma = ChromaVectorStore(collection_name=self.collection_name)
+        chroma._connect()
 
-        data = []
-        for chunk in chunks:
-            data.append({
-                "id": chunk["id"],
-                "text": chunk["text"],
-                "embedding": chunk["embedding"],
-                "source": chunk.get("source", ""),
-                "metadata": json.dumps(chunk.get("metadata", {}))
-            })
+        text_chunks = []
+        for c in chunks:
+            text_chunks.append(TextChunk(
+                id=c["id"],
+                text=c.get("text", ""),
+                source=c.get("source", ""),
+                category=c.get("metadata", {}).get("category", ""),
+                chapter=c.get("metadata", {}).get("chapter", ""),
+                section=c.get("metadata", {}).get("section", ""),
+                spin_stage=c.get("metadata", {}).get("spin_stage", ""),
+            ))
 
-        self._milvus_client.insert(
-            collection_name=self.collection_name,
-            data=data
-        )
-        return len(chunks)
-
-    def _add_chunks_memory(self, chunks: List[Dict]) -> int:
-        """Add chunks to in-memory store."""
-        count = 0
-        for chunk in chunks:
-            vector_chunk = VectorChunk(
-                id=chunk["id"],
-                text=chunk["text"],
-                embedding=chunk["embedding"],
-                source=chunk.get("source", ""),
-                metadata=chunk.get("metadata", {}),
-                created_at=datetime.now().isoformat()
-            )
-            self._memory_store[chunk["id"]] = vector_chunk
-            self._memory_vectors.append(chunk["embedding"])
-            self._memory_ids.append(chunk["id"])
-            count += 1
-        return count
+        before = chroma._collection.count()
+        chroma.add_chunks(text_chunks)
+        after = chroma._collection.count()
+        added = max(0, after - before)
+        return added
 
     def search(
         self,
@@ -147,157 +116,75 @@ class VectorStore:
         top_k: int = 5,
         source_filter: Optional[str] = None
     ) -> List[Dict]:
-        """
-        Search for similar chunks.
-
-        Args:
-            query_embedding: Query embedding vector
-            top_k: Number of results to return
-            source_filter: Optional source filter
-
-        Returns:
-            List of matching chunks with scores
-        """
-        if self.use_milvus:
-            return self._search_milvus(query_embedding, top_k, source_filter)
-        else:
-            return self._search_memory(query_embedding, top_k, source_filter)
-
-    def _search_milvus(
-        self,
-        query_embedding: List[float],
-        top_k: int,
-        source_filter: Optional[str]
-    ) -> List[Dict]:
-        """Search in Milvus."""
-        if not self._milvus_client:
-            return []
-
-        results = self._milvus_client.search(
-            collection_name=self.collection_name,
-            data=[query_embedding],
-            limit=top_k,
-            output_fields=["id", "text", "source", "metadata"]
+        """Search by query embedding (cosine, top_k)."""
+        self._connect()
+        where = {"source": source_filter} if source_filter else None
+        results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where=where,
+            include=["documents", "metadatas", "distances"]
         )
-
-        return [
-            {
-                "id": hit["id"],
-                "text": hit["text"],
-                "source": hit["source"],
-                "metadata": json.loads(hit["metadata"]) if hit.get("metadata") else {},
-                "score": 1 - hit.get("distance", 0)  # Convert distance to similarity
-            }
-            for hit in results[0]
-        ]
-
-    def _search_memory(
-        self,
-        query_embedding: List[float],
-        top_k: int,
-        source_filter: Optional[str]
-    ) -> List[Dict]:
-        """Search in memory using cosine similarity."""
-        if not self._memory_vectors:
-            return []
-
-        # Compute similarities
-        scores = []
-        for i, emb in enumerate(self._memory_vectors):
-            sim = self._cosine_similarity(query_embedding, emb)
-            chunk = self._memory_store[self._memory_ids[i]]
-
-            # Apply source filter
-            if source_filter and chunk.source != source_filter:
-                continue
-
-            scores.append((sim, chunk))
-
-        # Sort by score descending
-        scores.sort(key=lambda x: x[0], reverse=True)
-
-        # Return top_k results
-        return [
-            {
-                "id": chunk.id,
-                "text": chunk.text,
-                "source": chunk.source,
-                "metadata": chunk.metadata,
-                "score": score
-            }
-            for score, chunk in scores[:top_k]
-        ]
-
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Compute cosine similarity between two vectors."""
-        dot = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a ** 2 for a in vec1) ** 0.5
-        norm2 = sum(b ** 2 for b in vec2) ** 0.5
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        return dot / (norm1 * norm2)
+        out: List[Dict] = []
+        if not results["ids"]:
+            return out
+        for i, cid in enumerate(results["ids"][0]):
+            distance = results["distances"][0][i]
+            # chromadb cosine distance for L2-normalized vectors:
+            #   cosine_dist = 1 - dot_product, in [0, 2]
+            #   dot_product in [-1, 1]  (1 == identical, -1 == opposite)
+            #   so  dot_product = 1 - distance
+            # Map to [0, 1] for the API's `score` field:
+            #   score = (1 - distance + 1) / 2 = 1 - distance/2
+            score = 1.0 - distance / 2.0
+            out.append({
+                "id": cid,
+                "text": (results["documents"][0][i] if results["documents"] else ""),
+                "source": (results["metadatas"][0][i].get("source", "")
+                           if results["metadatas"] else ""),
+                "metadata": (results["metadatas"][0][i] if results["metadatas"] else {}),
+                "score": score,
+            })
+        return out
 
     def get_by_source(self, source: str) -> List[Dict]:
-        """Get all chunks from a specific source."""
-        if self.use_milvus:
-            return self._get_by_source_milvus(source)
-        else:
-            return self._get_by_source_memory(source)
-
-    def _get_by_source_milvus(self, source: str) -> List[Dict]:
-        """Get chunks by source from Milvus."""
-        # Milvus doesn't support direct filtering well, return empty
-        # In production, use a separate metadata database
-        return []
-
-    def _get_by_source_memory(self, source: str) -> List[Dict]:
-        """Get chunks by source from memory."""
-        return [
-            chunk.to_dict()
-            for chunk in self._memory_store.values()
-            if chunk.source == source
-        ]
+        self._connect()
+        results = self._collection.get(
+            where={"source": source},
+            include=["documents", "metadatas"],
+        )
+        out = []
+        for i, cid in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results["metadatas"] else {}
+            out.append({
+                "id": cid,
+                "text": results["documents"][i] if results["documents"] else "",
+                "source": meta.get("source", ""),
+                "metadata": meta,
+            })
+        return out
 
     def delete_by_source(self, source: str) -> int:
-        """Delete all chunks from a specific source."""
-        if self.use_milvus:
-            # Would need to implement in Milvus
-            return 0
-
-        to_delete = [
-            chunk_id for chunk_id, chunk in self._memory_store.items()
-            if chunk.source == source
-        ]
-
-        for chunk_id in to_delete:
-            idx = self._memory_ids.index(chunk_id)
-            del self._memory_store[chunk_id]
-            del self._memory_vectors[idx]
-            del self._memory_ids[idx]
-
-        return len(to_delete)
+        self._connect()
+        results = self._collection.get(
+            where={"source": source},
+            include=[],
+        )
+        ids = results["ids"]
+        if ids:
+            self._collection.delete(ids=ids)
+        return len(ids)
 
     def count(self) -> Dict:
-        """Get count of chunks by source."""
-        counts = {"total": len(self._memory_store)}
-        for chunk in self._memory_store.values():
-            source = chunk.source or "unknown"
-            counts[source] = counts.get(source, 0) + 1
-        return counts
+        self._connect()
+        total = self._collection.count()
+        return {"total": total, "chromadb": True}
 
     def clear(self):
-        """Clear all chunks (use with caution)."""
-        if self.use_milvus and self._milvus_client:
-            self._milvus_client.drop_collection(self.collection_name)
-            self._milvus_client.create_collection(
-                collection_name=self.collection_name,
-                dimension=384,
-                primary_field="id",
-                vector_field="embedding"
-            )
-
-        self._memory_store.clear()
-        self._memory_vectors.clear()
-        self._memory_ids.clear()
+        self._connect()
+        # Drop and recreate — destructive
+        self._chroma.delete_collection(self.collection_name)
+        self._collection = self._chroma.create_collection(
+            name=self.collection_name,
+            metadata={"description": "Sales Agent Knowledge Base (RAG stack)"}
+        )

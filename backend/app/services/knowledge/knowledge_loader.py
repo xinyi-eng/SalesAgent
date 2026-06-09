@@ -34,11 +34,32 @@ class KnowledgeLoader:
         self._ensure_loaded()
 
     def _ensure_loaded(self):
-        """确保知识库已加载"""
+        """确保知识库已加载
+
+        关键：只在 ChromaDB 真的为空时才嵌入。
+        已索引的 chunks 直接复用（避免每次启动都跑 90s 嵌入）。
+        """
         if KnowledgeLoader._loaded:
             return
 
-        # 获取数据目录 - 需要5层上级目录到达项目根目录
+        # 1. 先检查 ChromaDB 是不是已经有数据了
+        #    强制 vector_store 连接（init 时是 lazy 的）
+        try:
+            self.vector_store._connect()
+            existing = 0
+            if self.vector_store._collection is not None:
+                existing = self.vector_store._collection.count()
+        except Exception as e:
+            print(f"[KnowledgeLoader] vector_store connect failed: {e}")
+            existing = 0
+
+        if existing > 0:
+            print(f"[KnowledgeLoader] ChromaDB already has {existing} chunks — "
+                  f"skipping re-embedding. Embedding happens only once per dataset.")
+            KnowledgeLoader._loaded = True
+            return
+
+        # 2. 真的空，扫描原始数据目录并嵌入
         path = __file__
         for _ in range(5):
             path = os.path.dirname(path)
@@ -46,7 +67,11 @@ class KnowledgeLoader:
         data_dir = os.path.join(project_root, '原始数据')
 
         if os.path.exists(data_dir):
-            self.load_all_books(data_dir)
+            print(f"[KnowledgeLoader] ChromaDB empty, loading from {data_dir} ...")
+            stats = self.load_all_books(data_dir)
+            print(f"[KnowledgeLoader] Initial load done: {stats}")
+        else:
+            print(f"[KnowledgeLoader] data dir not found: {data_dir}")
 
         KnowledgeLoader._loaded = True
 

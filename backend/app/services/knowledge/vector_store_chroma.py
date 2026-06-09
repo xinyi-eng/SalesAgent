@@ -96,34 +96,40 @@ class ChromaVectorStore(VectorStore):
             # 获取embedding模型
             embedder = get_embedding_model()
 
-            # 准备数据
-            ids = []
-            texts = []
-            embeddings = []
-            metadatas = []
+            # ChromaDB 单次 .add() 的 batch size 上限是 5461
+            # 超过会抛 "Batch size of N is greater than max batch size of 5461"
+            # 这里分批处理，避免大批量失败
+            CHROMA_BATCH_LIMIT = 5000
 
-            for chunk in chunks:
-                ids.append(chunk.id)
-                texts.append(chunk.text)
-                embeddings.append(embedder.embed_query(chunk.text))
-                metadatas.append({
-                    "source": chunk.source,
-                    "category": chunk.category,
-                    "chapter": chunk.chapter,
-                    "section": chunk.section,
-                    "spin_stage": chunk.spin_stage or ""
-                })
+            for batch_start in range(0, len(chunks), CHROMA_BATCH_LIMIT):
+                batch = chunks[batch_start:batch_start + CHROMA_BATCH_LIMIT]
+                ids = []
+                texts = []
+                embeddings = []
+                metadatas = []
 
-            # 添加到集合
-            self._collection.add(
-                ids=ids,
-                documents=texts,
-                embeddings=embeddings,
-                metadatas=metadatas
-            )
+                for chunk in batch:
+                    ids.append(chunk.id)
+                    texts.append(chunk.text)
+                    embeddings.append(embedder.embed_query(chunk.text))
+                    metadatas.append({
+                        "source": chunk.source,
+                        "category": chunk.category,
+                        "chapter": chunk.chapter,
+                        "section": chunk.section,
+                        "spin_stage": chunk.spin_stage or ""
+                    })
+
+                self._collection.add(
+                    ids=ids,
+                    documents=texts,
+                    embeddings=embeddings,
+                    metadatas=metadatas
+                )
+                print(f"Added {len(batch)} chunks to ChromaDB "
+                      f"(batch {batch_start//CHROMA_BATCH_LIMIT + 1})")
 
             self._chunks.extend(chunks)
-            print(f"Added {len(chunks)} chunks to ChromaDB")
             return True
 
         except Exception as e:
