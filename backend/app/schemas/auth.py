@@ -27,6 +27,7 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+    user: Optional["UserResponse"] = None  # 前端需要 user 字段更新 AuthContext
 
 
 class TokenPayload(BaseModel):
@@ -60,3 +61,7 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     avatar_url: Optional[str] = None
     bio: Optional[str] = None
+
+
+# 解析前向引用 — TokenResponse.user 引用了本文件中的 UserResponse
+TokenResponse.model_rebuild()

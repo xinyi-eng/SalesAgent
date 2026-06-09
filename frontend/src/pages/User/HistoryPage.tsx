@@ -33,6 +33,7 @@ const HistoryPage = () => {
   const [sessions, setSessions] = useState<SessionListItem[]>([])
   const [stats, setStats] = useState<HistoryStatsResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [filter, setFilter] = useState({ type: '', dateRange: '30days' })
@@ -44,37 +45,30 @@ const HistoryPage = () => {
 
   const loadHistory = async () => {
     setIsLoading(true)
+    setHistoryError(null)
     try {
       const params: any = { page, page_size: 20 }
       if (filter.type) {
         params.scenario_type = filter.type
       }
-      if (filter.dateRange === '7days') {
-        // Filter handled by date on frontend for now
-      }
 
       const response = await api.getSessions(params)
-      setSessions(response.data)
+      // 客户端按日期范围过滤（后端暂不支持 date_range 参数）
+      let data = response.data || []
+      if (filter.dateRange === '7days') {
+        const weekAgo = Date.now() - 7 * 86400_000
+        data = data.filter((s) => s.created_at && new Date(s.created_at).getTime() >= weekAgo)
+      } else if (filter.dateRange === '30days') {
+        const monthAgo = Date.now() - 30 * 86400_000
+        data = data.filter((s) => s.created_at && new Date(s.created_at).getTime() >= monthAgo)
+      }
+      setSessions(data)
       setTotal(response.total)
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to load history:', error)
-      // Fallback to demo data on error
-      setSessions([{
-        id: 'demo-1',
-        scenario_id: 'demo',
-        scenario_name: 'CRM系统需求挖掘',
-        scenario_type: 'online_meeting',
-        user_id: 'anonymous',
-        role_config: { position_level: 'junior', personality: 'rational', decision_style: 'price_oriented' },
-        status: 'completed',
-        current_phase: 'closing',
-        score: 82,
-        message_count: 42,
-        duration_minutes: 25,
-        created_at: new Date().toISOString(),
-        ended_at: new Date().toISOString()
-      }])
-      setTotal(1)
+      setHistoryError(error?.response?.data?.detail || error?.message || '加载历史失败')
+      setSessions([])
+      setTotal(0)
     }
     setIsLoading(false)
   }
@@ -85,23 +79,7 @@ const HistoryPage = () => {
       setStats(response)
     } catch (error) {
       console.error('Failed to load stats:', error)
-      // Fallback to demo data
-      setStats({
-        last_30_days: {
-          sessions: 12,
-          completed: 10,
-          duration_minutes: 420,
-          messages: 1250,
-          avg_score: 76.5
-        },
-        last_90_days: {
-          sessions: 35,
-          completed: 28,
-          duration_minutes: 1450,
-          messages: 4200,
-          avg_score: 74.2
-        }
-      })
+      setStats(null)  // 不再填充假数据，让 UI 显示空状态
     }
   }
 

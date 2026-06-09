@@ -1,13 +1,25 @@
 /**
  * ChatContainer Component - Main chat interface
- * Enhanced with streaming audio support, VAD events, and playback control
+ * Enhanced with streaming audio support, VAD events, and playback control.
+ *
+ * NOTE: this component used to instantiate its own `useAudioStream()`,
+ * which made playback state desync from the parent's audioStream
+ * (clicking "播放" actually played audio, but the play indicator never
+ * updated because it was reading the wrong instance). The container now
+ * only consumes the audioStream via props from the parent.
  */
 import { useEffect, useRef, useState } from 'react'
-import { StreamMessage } from '../../../hooks/useWebSocket'
-import { useAudioRecorder } from '../../../hooks/useAudioRecorder'
-import { useAudioStream } from '../../../hooks/useAudioStream'
 import ChatMessage from './ChatMessage'
 import ChatInput from './ChatInput'
+
+interface KnowledgeRef {
+  category?: string
+  source?: string
+  chapter?: string
+  section?: string
+  excerpt?: string
+  relevance?: number
+}
 
 interface MessageItem {
   id: string
@@ -15,36 +27,40 @@ interface MessageItem {
   content: string
   audioData?: string  // Base64 encoded audio
   isSending?: boolean
-  isStreaming?: boolean
   timestamp: string
+  knowledgeRefs?: KnowledgeRef[]
 }
 
 interface ChatContainerProps {
   messages: MessageItem[]
+  customerLabel?: string
   onSendMessage: (message: string, audioData?: string) => void
   onVoiceStart?: () => void
   onVoiceEnd?: () => void
   onStopPlayback?: () => void
+  onPlayAudio?: (audioData: string) => void
   isDisabled?: boolean
   isSending?: boolean
   isConnected?: boolean
+  isPlayingAudio?: boolean
 }
 
 const ChatContainer = ({
   messages,
+  customerLabel,
   onSendMessage,
   onVoiceStart,
   onVoiceEnd,
   onStopPlayback,
+  onPlayAudio,
   isDisabled = false,
   isSending = false,
-  isConnected = false
+  isConnected = false,
+  isPlayingAudio = false
 }: ChatContainerProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [isNearBottom, setIsNearBottom] = useState(true)
-  const { playAudio, isPlaying } = useAudioRecorder()
-  const audioStream = useAudioStream()
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -65,14 +81,13 @@ const ChatContainer = ({
     }
   }
 
-  // Play audio message
+  // Play audio message - delegate to parent (which owns the audioStream)
   const handlePlayAudio = (audioData: string) => {
-    playAudio(audioData)
-  }
-
-  const handleStopPlayback = () => {
-    audioStream.stop()
-    onStopPlayback?.()
+    if (onPlayAudio) {
+      onPlayAudio(audioData)
+    } else {
+      console.warn('[ChatContainer] No onPlayAudio prop provided; cannot play audio.')
+    }
   }
 
   return (
@@ -113,10 +128,11 @@ const ChatContainer = ({
             content={message.content}
             audioData={message.audioData}
             isSending={message.isSending}
-            isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             onPlayAudio={message.audioData ? () => handlePlayAudio(message.audioData!) : undefined}
-            isPlayingAudio={isPlaying || audioStream.isPlaying}
+            isPlayingAudio={isPlayingAudio}
+            customerLabel={customerLabel}
+            knowledgeRefs={message.knowledgeRefs}
           />
         ))}
 
@@ -134,7 +150,7 @@ const ChatContainer = ({
         )}
 
         {/* Streaming indicator */}
-        {audioStream.isBuffering && (
+        {isPlayingAudio && (
           <div className="flex justify-start">
             <div className="px-4 py-2 rounded-2xl bg-primary/10 text-primary text-sm">
               <span className="flex items-center gap-2">
@@ -163,10 +179,10 @@ const ChatContainer = ({
         onSendMessage={onSendMessage}
         onVoiceStart={onVoiceStart}
         onVoiceEnd={onVoiceEnd}
-        onStopPlayback={handleStopPlayback}
+        onStopPlayback={onStopPlayback}
         isDisabled={isDisabled}
         isSending={isSending}
-        isPlayingAudio={audioStream.isPlaying}
+        isPlayingAudio={isPlayingAudio}
       />
     </div>
   )

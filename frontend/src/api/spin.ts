@@ -1,7 +1,31 @@
 /**
  * SPIN API Client
  */
-import api from './index'
+import axios from 'axios'
+
+const API_BASE = '/api/v1'
+
+export interface CompanyInfo {
+  subject_type: 'company'
+  background: string
+  recent_news: string[]
+  competitors: string[]
+  potential_pains: string[]
+  extra_info: Record<string, unknown>
+}
+
+export interface PersonInfo {
+  subject_type: 'person'
+  name: string
+  title: string
+  company: string
+  background: string
+  recent_activities: string[]
+  potential_pains: string[]
+  extra_info: Record<string, unknown>
+}
+
+export type InvestigationResult = CompanyInfo | PersonInfo
 
 export interface CustomerContext {
   industry: string
@@ -31,36 +55,50 @@ export interface SpinQuestionResponse {
 
 export const spinApi = {
   /**
+   * 调查客户信息（公司或个人）
+   */
+  async investigate(customerName: string): Promise<InvestigationResult> {
+    const response = await axios.post<{success: boolean; data?: InvestigationResult; error?: string}>(
+      `${API_BASE}/spin/investigate`,
+      { customer_name: customerName }
+    )
+    if (!response.data.success || !response.data.data) {
+      throw new Error(response.data.error || '调查失败')
+    }
+    return response.data.data
+  },
+
+  /**
    * 生成SPIN问题清单
    */
   async generateQuestions(customer: CustomerContext): Promise<SpinQuestionList> {
-    const response = await api.post<SpinQuestionResponse>('/spin/questions', {
+    const response = await axios.post<SpinQuestionResponse>(`${API_BASE}/spin/questions`, {
       customer
     })
-    if (!response.success || !response.data) {
-      throw new Error(response.error || '生成失败')
+    if (!response.data.success || !response.data.data) {
+      throw new Error(response.data.error || '生成失败')
     }
-    return response.data
+    return response.data.data
   },
 
   /**
    * 获取问题清单
    */
   async getQuestions(questionListId: string): Promise<SpinQuestionList> {
-    const response = await api.get<SpinQuestionResponse>(`/spin/questions/${questionListId}`)
-    if (!response.success || !response.data) {
-      throw new Error(response.error || '获取失败')
+    const response = await axios.get<SpinQuestionResponse>(`${API_BASE}/spin/questions/${questionListId}`)
+    if (!response.data.success || !response.data.data) {
+      throw new Error(response.data.error || '获取失败')
     }
-    return response.data
+    return response.data.data
   },
 
   /**
    * 获取最新问题清单
    */
   async getLatestQuestions(): Promise<SpinQuestionList | null> {
-    const response = await api.get<SpinQuestionResponse>('/spin/questions')
-    if (response.success && response.data) {
-      return response.data
+    const response = await axios.get<SpinQuestionResponse>(`${API_BASE}/spin/questions`)
+    if (response.data.success && response.data.data) {
+      return response.data.data
     }
     return null
   }

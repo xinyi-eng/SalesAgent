@@ -18,11 +18,13 @@ const KnowledgeBasePage = () => {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [isSearching, setIsSearching] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
 
   // Documents state
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
   const [stats, setStats] = useState<KnowledgeStats | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [isIngesting, setIsIngesting] = useState(false)
 
   // SPIN form state
@@ -31,6 +33,7 @@ const KnowledgeBasePage = () => {
   const [spinPainPoints, setSpinPainPoints] = useState('')
   const [spinQuestions, setSpinQuestions] = useState<SpinQuestions | null>(null)
   const [isGeneratingSpin, setIsGeneratingSpin] = useState(false)
+  const [spinError, setSpinError] = useState<string | null>(null)
 
   const tabs = [
     { key: 'search', label: '知识检索' },
@@ -38,34 +41,30 @@ const KnowledgeBasePage = () => {
     { key: 'spin', label: 'SPIN问题生成' }
   ]
 
-  // Load initial data
-  useEffect(() => {
-    const loadData = async () => {
-      setIsLoading(true)
-      try {
-        const [docsData, statsData] = await Promise.all([
-          api.getDocuments(),
-          api.getStats()
-        ])
-        setDocuments(docsData)
-        setStats(statsData)
-      } catch (error) {
-        console.error('Failed to load knowledge base data:', error)
-        // Fallback to mock data for demo
-        setDocuments([
-          { id: '1', name: 'SPIN销售巨人.pdf', category: 'spin', status: 'completed', chunk_count: 156 },
-          { id: '2', name: '新战略营销（第三版）.pdf', category: 'strategic_marketing', status: 'completed', chunk_count: 203 },
-          { id: '3', name: '新解决方案销售.pdf', category: 'solution_selling', status: 'completed', chunk_count: 178 }
-        ])
-        setStats({
-          total_documents: 3,
-          total_chunks: 537,
-          documents_by_category: { spin: 1, strategic_marketing: 1, solution_selling: 1 },
-          chunks_by_source: {}
-        })
-      }
+  // Load initial data — 失败时显示错误状态，不填充假数据
+  const loadData = async () => {
+    setIsLoading(true)
+    setLoadError(null)
+    try {
+      const [docsData, statsData] = await Promise.all([
+        api.getDocuments(),
+        api.getStats()
+      ])
+      setDocuments(docsData || [])
+      setStats(statsData)
+    } catch (error: any) {
+      console.error('Failed to load knowledge base data:', error)
+      setLoadError(
+        error?.response?.data?.detail || error?.message || '加载知识库失败'
+      )
+      setDocuments([])
+      setStats(null)
+    } finally {
       setIsLoading(false)
     }
+  }
+
+  useEffect(() => {
     if (activeTab === 'documents') {
       loadData()
     }
@@ -75,21 +74,19 @@ const KnowledgeBasePage = () => {
     if (!searchQuery.trim()) return
 
     setIsSearching(true)
+    setSearchError(null)
     try {
       const response = await api.search(searchQuery, 5)
-      setSearchResults(response.results)
-    } catch (error) {
+      setSearchResults(response.results || [])
+    } catch (error: any) {
       console.error('Search failed:', error)
-      // Demo results fallback
-      setSearchResults([{
-        id: '1',
-        text: '在销售对话中，SPIN模型的前两个阶段——探查现状（Situation）和挖掘问题（Problem）——至关重要。',
-        source: 'SPIN销售巨人.pdf',
-        score: 0.92,
-        metadata: { category: 'spin', page: 45 }
-      }])
+      setSearchResults([])  // 失败时不返回任何伪造结果
+      setSearchError(
+        error?.response?.data?.detail || error?.message || '搜索失败'
+      )
+    } finally {
+      setIsSearching(false)
     }
-    setIsSearching(false)
   }
 
   const handleIngestAll = async () => {
@@ -97,18 +94,14 @@ const KnowledgeBasePage = () => {
     try {
       const response = await api.ingestAll()
       // Reload data after ingest
-      const [docsData, statsData] = await Promise.all([
-        api.getDocuments(),
-        api.getStats()
-      ])
-      setDocuments(docsData)
-      setStats(statsData)
+      await loadData()
       alert(`知识库更新完成！共处理 ${response.total} 个文档`)
-    } catch (error) {
+    } catch (error: any) {
       console.error('Ingest failed:', error)
-      alert('更新失败，请重试')
+      alert('更新失败：' + (error?.response?.data?.detail || error?.message || '未知错误'))
+    } finally {
+      setIsIngesting(false)
     }
-    setIsIngesting(false)
   }
 
   const handleGenerateSpin = async () => {
@@ -118,35 +111,24 @@ const KnowledgeBasePage = () => {
     }
 
     setIsGeneratingSpin(true)
+    setSpinError(null)
     try {
-      const painPointsList = spinPainPoints.split(',').map(p => p.trim())
+      const painPointsList = spinPainPoints.split(',').map(p => p.trim()).filter(Boolean)
       const response = await api.generateSpinQuestions({
         customer_industry: spinIndustry,
         customer_scale: spinScale,
         pain_points: painPointsList
       })
       setSpinQuestions(response)
-    } catch (error) {
+    } catch (error: any) {
       console.error('SPIN generation failed:', error)
-      // Demo fallback
-      setSpinQuestions({
-        situation_questions: [
-          `请介绍一下${spinIndustry}行业目前的发展趋势？`,
-          `贵公司的业务规模大概是多少人？`
-        ],
-        problem_questions: [
-          `在${spinIndustry}行业，您遇到的最大挑战是什么？`
-        ],
-        implication_questions: [
-          `如果问题不解决，对业务会有什么影响？`
-        ],
-        need_payoff_questions: [
-          `如果有一种方法能帮您解决这些问题，您想了解一下吗？`
-        ],
-        context_used: ['基于SPIN销售巨人模型', `针对${spinIndustry}行业特点`]
-      })
+      setSpinQuestions(null)
+      setSpinError(
+        error?.response?.data?.detail || error?.message || 'SPIN 生成失败'
+      )
+    } finally {
+      setIsGeneratingSpin(false)
     }
-    setIsGeneratingSpin(false)
   }
 
   const renderSearchTab = () => (
@@ -169,10 +151,15 @@ const KnowledgeBasePage = () => {
         </button>
       </div>
 
-      {searchResults.length > 0 ? (
+      {searchError ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          搜索失败：{searchError}
+          <button onClick={handleSearch} className="ml-3 underline">重试</button>
+        </div>
+      ) : searchResults.length > 0 ? (
         <div className="space-y-4">
           <p className="text-sm text-gray-500">找到 {searchResults.length} 条相关知识</p>
-          {searchResults.map((result, index) => (
+          {searchResults.map((result) => (
             <div key={result.id} className="bg-white p-4 rounded-lg border border-gray-200">
               <div className="flex items-center justify-between mb-2">
                 <span className={`px-2 py-1 text-xs font-medium rounded ${
@@ -226,7 +213,12 @@ const KnowledgeBasePage = () => {
         </button>
       </div>
 
-      {isLoading ? (
+      {loadError ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          加载失败：{loadError}
+          <button onClick={loadData} className="ml-3 underline">重试</button>
+        </div>
+      ) : isLoading ? (
         <div className="flex justify-center py-8">
           <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
         </div>
@@ -341,6 +333,13 @@ const KnowledgeBasePage = () => {
           )}
         </button>
       </div>
+
+      {spinError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          SPIN 生成失败：{spinError}
+          <button onClick={handleGenerateSpin} className="ml-3 underline">重试</button>
+        </div>
+      )}
 
       {spinQuestions && (
         <div className="space-y-4">

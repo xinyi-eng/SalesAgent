@@ -57,6 +57,7 @@ class RoleConfig(BaseModel):
     position_level: str = Field(..., description="岗位级别")
     personality: str = Field(..., description="性格特征")
     decision_style: str = Field(..., description="决策风格")
+    voice: Optional[str] = Field(None, description="TTS声线ID")
 
 
 # Session schemas
@@ -64,6 +65,9 @@ class SessionCreate(BaseModel):
     """Create practice session schema"""
     scenario_id: UUID
     role_config: RoleConfig
+    customer_context: Optional[dict] = None  # SPIN客户背景信息（行业、规模、痛点）
+    investigation_result: Optional[dict] = None  # AI调查的客户详细信息
+    user_context: Optional[dict] = None  # 销售员自填的练习档案（职级/年限/重点/难度/备注）
 
 
 class SessionResponse(BaseModel):
@@ -238,3 +242,62 @@ class WSAIMessage(BaseModel):
     audio_url: Optional[str] = None
     stream: bool = False
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============== Industry Brief schemas ==============
+
+
+class BriefItem(BaseModel):
+    """One structured news item in a brief (来自真实 RSS)"""
+    title: str
+    url: str = ""               # 原文链接（必真实）
+    source: str = ""            # e.g. "36氪", "Reuters"
+    source_level: str = ""      # L1=权威官方 / L2=权威媒体 / L3=行业垂直 / L4=社交舆情
+    summary: str = ""           # 2-3 句摘要
+    date: str = ""              # 兼容旧版，e.g. "2026-05-30"
+    published_at: str = ""       # ISO8601 新版
+    relevance: float = 0.0      # 0-1
+
+
+class BriefGenerateRequest(BaseModel):
+    """Request body for /briefs/generate"""
+    industry: str = Field(..., min_length=1, max_length=80)
+    keywords: Optional[str] = Field(None, max_length=500)
+    title: Optional[str] = Field(None, max_length=200)
+
+
+class BriefSummary(BaseModel):
+    """Brief item in a list response"""
+    id: str
+    title: str
+    industry: Optional[str] = None
+    keywords: Optional[str] = None
+    item_count: int = 0
+    takeaway_count: int = 0
+    status: str = "ready"
+    created_at: datetime
+
+
+class BriefDetail(BriefSummary):
+    """Full brief including items and takeaways"""
+    summary: Optional[str] = None
+    items: List[BriefItem] = Field(default_factory=list)
+    key_takeaways: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class BriefSubscription(BaseModel):
+    """单个行业订阅"""
+    industry: str = Field(..., min_length=1, max_length=80)
+    keywords: str = Field(default="", max_length=500)
+
+
+class BriefSubscriptionsUpdate(BaseModel):
+    """订阅列表请求/响应"""
+    subscriptions: List[BriefSubscription] = Field(default_factory=list)
+
+
+class TodayBriefs(BaseModel):
+    """今日简报按行业分组"""
+    date: str
+    industries: dict = Field(default_factory=dict)   # {industry: [BriefSummary]}

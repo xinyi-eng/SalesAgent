@@ -9,39 +9,38 @@
  *
  * Story: 3.1 数据概览仪表盘
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import api, { DashboardStats as DashboardStatsType } from '../../api/practice'
+import api, { DashboardStats as DashboardStatsType, SessionListItem } from '../../api/practice'
 
 const DashboardPage = () => {
   const navigate = useNavigate()
   const [stats, setStats] = useState<DashboardStatsType | null>(null)
+  const [recentSessions, setRecentSessions] = useState<SessionListItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const loadDashboard = async () => {
-      setIsLoading(true)
-      try {
-        const response = await api.getDashboardStats()
-        setStats(response)
-      } catch (error) {
-        console.error('Failed to load dashboard stats:', error)
-        // Fallback to demo data
-        setStats({
-          total_sessions: 42,
-          total_time_minutes: 1260,
-          avg_score: 76.5,
-          improvement_rate: 12.5,
-          this_week_sessions: 5,
-          this_week_time: 180,
-          this_week_score: 82.3,
-          streak_days: 7
-        })
-      }
+  const loadDashboard = useCallback(async () => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const [statsRes, sessionsRes] = await Promise.all([
+        api.getDashboardStats(),
+        api.getSessions({ page: 1, page_size: 5 }),
+      ])
+      setStats(statsRes)
+      setRecentSessions(sessionsRes.data || [])
+    } catch (err: any) {
+      console.error('Failed to load dashboard:', err)
+      setError(err?.response?.data?.detail || err?.message || '加载失败')
+    } finally {
       setIsLoading(false)
     }
-    loadDashboard()
   }, [])
+
+  useEffect(() => {
+    loadDashboard()
+  }, [loadDashboard])
 
   const formatTime = (minutes: number) => {
     if (minutes < 60) return `${minutes}m`
@@ -49,17 +48,41 @@ const DashboardPage = () => {
     return `${hours}h`
   }
 
-  const recentActivities = [
-    { type: 'practice', title: '完成CRM需求挖掘练习', time: '2小时前', score: 85 },
-    { type: 'review', title: '查看复盘报告', time: '5小时前', score: null },
-    { type: 'practice', title: '完成ERP报价谈判', time: '昨天', score: 78 },
-    { type: 'practice', title: '完成工厂参观练习', time: '2天前', score: 72 }
-  ]
+  const formatRelativeTime = (iso: string) => {
+    if (!iso) return ''
+    const then = new Date(iso).getTime()
+    const now = Date.now()
+    const diffMs = now - then
+    const diffMin = Math.floor(diffMs / 60000)
+    if (diffMin < 1) return '刚刚'
+    if (diffMin < 60) return `${diffMin}分钟前`
+    const diffHr = Math.floor(diffMin / 60)
+    if (diffHr < 24) return `${diffHr}小时前`
+    const diffDay = Math.floor(diffHr / 24)
+    if (diffDay < 30) return `${diffDay}天前`
+    return new Date(iso).toLocaleDateString('zh-CN')
+  }
 
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (error && !stats) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="bg-white rounded-xl p-8 shadow-sm text-center max-w-md">
+          <p className="text-red-600 mb-4">{error}</p>
+          <button
+            onClick={loadDashboard}
+            className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90"
+          >
+            重试
+          </button>
+        </div>
       </div>
     )
   }
@@ -208,29 +231,39 @@ const DashboardPage = () => {
               </button>
             </div>
             <div className="space-y-3">
-              {recentActivities.map((activity, idx) => (
-                <div key={idx} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                  <div className={`
-                    w-10 h-10 rounded-full flex items-center justify-center
-                    ${activity.type === 'practice' ? 'bg-primary/10' : 'bg-secondary/10'}
-                  `}>
-                    {activity.type === 'practice' ? (
-                      <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                      </svg>
-                    )}
+              {recentSessions.length === 0 && !isLoading && (
+                <div className="text-center py-6 text-sm text-gray-500">
+                  暂无练习记录。
+                  <button
+                    onClick={() => navigate('/practice')}
+                    className="text-primary hover:underline ml-1"
+                  >
+                    开始第一次练习
+                  </button>
+                </div>
+              )}
+              {recentSessions.map((s) => (
+                <div
+                  key={s.id}
+                  onClick={() => navigate(`/practice/review?session_id=${s.id}`)}
+                  className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100"
+                >
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center bg-primary/10">
+                    <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
                   </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-gray-900">{activity.title}</p>
-                    <p className="text-xs text-gray-500">{activity.time}</p>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">
+                      {s.scenario_name || '对练'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {formatRelativeTime(s.created_at)} · {s.message_count} 条对话 · {s.duration_minutes}m
+                    </p>
                   </div>
-                  {activity.score && (
+                  {s.score != null && (
                     <span className="px-2 py-1 bg-success/10 text-success text-sm font-medium rounded">
-                      {activity.score}分
+                      {s.score}分
                     </span>
                   )}
                 </div>
@@ -254,6 +287,18 @@ const DashboardPage = () => {
                 </svg>
               </div>
               <p className="text-sm font-medium text-gray-900">开始练习</p>
+            </button>
+
+            <button
+              onClick={() => navigate('/briefs')}
+              className="p-4 border border-gray-200 rounded-lg hover:border-secondary hover:bg-secondary/5 transition-all text-center group"
+            >
+              <div className="w-12 h-12 bg-secondary/10 rounded-lg flex items-center justify-center mx-auto mb-2 group-hover:bg-secondary/20">
+                <svg className="w-6 h-6 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+                </svg>
+              </div>
+              <p className="text-sm font-medium text-gray-900">行业简报</p>
             </button>
 
             <button

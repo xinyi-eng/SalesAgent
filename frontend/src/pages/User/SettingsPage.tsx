@@ -12,9 +12,10 @@
  */
 import { useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
+import authApi from '../../api/auth'
 
 const SettingsPage = () => {
-  const { user, logout } = useAuth()
+  const { user } = useAuth()
   const [activeTab, setActiveTab] = useState('account')
 
   // Account settings
@@ -42,24 +43,48 @@ const SettingsPage = () => {
   // Theme settings
   const [theme, setTheme] = useState('light') // light, dark, system
 
+  const [accountSaving, setAccountSaving] = useState(false)
+  const [accountError, setAccountError] = useState<string | null>(null)
+
   const handleSaveAccount = async () => {
     if (newPassword && newPassword !== confirmPassword) {
-      alert('两次密码不一致')
+      setAccountError('两次密码不一致')
       return
     }
-    // In production, call API
-    await new Promise(resolve => setTimeout(resolve, 500))
-    alert('设置已保存')
+    setAccountSaving(true)
+    setAccountError(null)
+    try {
+      // 真实调用：邮箱 / 用户名（如果需要改）写回后端
+      await authApi.updateMe({ email: email || undefined })
+      setPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      alert('账号设置已保存')
+    } catch (err: any) {
+      setAccountError(err?.response?.data?.detail || err?.message || '保存失败')
+    } finally {
+      setAccountSaving(false)
+    }
   }
 
   const handleSaveNotifications = async () => {
-    await new Promise(resolve => setTimeout(resolve, 500))
-    alert('通知设置已保存')
+    // 通知偏好后端暂未提供独立端点；先持久化到 localStorage
+    try {
+      localStorage.setItem('sa:notifications', JSON.stringify(notifications))
+      alert('通知设置已保存到本地（后端尚未提供通知偏好接口）')
+    } catch {
+      alert('保存失败')
+    }
   }
 
   const handleSaveAiSettings = async () => {
-    await new Promise(resolve => setTimeout(resolve, 500))
-    alert('AI设置已保存')
+    // AI 行为偏好后端暂未提供；持久化到 localStorage
+    try {
+      localStorage.setItem('sa:ai_settings', JSON.stringify(aiSettings))
+      alert('AI 行为已保存到本地（后端尚未提供 AI 偏好接口）')
+    } catch {
+      alert('保存失败')
+    }
   }
 
   const tabs = [

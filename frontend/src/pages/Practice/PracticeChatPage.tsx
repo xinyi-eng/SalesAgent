@@ -10,30 +10,47 @@
  *
  * Story: 1.2 语音对话与实时交互
  */
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { usePracticeStore } from '../../stores/practiceStore'
-import { useWebSocket, WebSocketMessage } from '../../hooks/useWebSocket'
+import { useWebSocket, StreamMessage } from '../../hooks/useWebSocket'
 import { useAudioStream } from '../../hooks/useAudioStream'
 import ChatContainer from '../../components/business/practice/ChatContainer'
 import PhaseSummaryModal from '../../components/business/practice/PhaseSummaryModal'
+import SpinStageHint from '../../components/business/practice/SpinStageHint'
 import api, { RoleConfig } from '../../api/practice'
 
 interface MessageItem {
   id: string
   type: 'user' | 'ai' | 'system'
   content: string
+  audioData?: string  // base64 encoded audio for replay
   isSending?: boolean
   timestamp: string
+  knowledgeRefs?: Array<{
+    category?: string
+    source?: string
+    chapter?: string
+    section?: string
+    excerpt?: string
+    relevance?: number
+  }>
 }
 
 interface PhaseSummaryData {
   phase: string
   phase_label: string
+  overall_score: number
+  situation_score: number
+  problem_score: number
+  implication_score: number
+  need_payoff_score: number
   good_points: string[]
   improvements: string[]
   suggestions: string[]
 }
+
+const VALID_PHASES = ['opening', 'discovery', 'needs', 'proposal', 'closing'] as const
 
 const PracticeChatPage = () => {
   const navigate = useNavigate()
@@ -41,60 +58,183 @@ const PracticeChatPage = () => {
     currentSession,
     selectedScenario,
     selectedRoleConfig,
-    messages,
-    updateMessage,
     updateSessionPhase,
-    phaseSummaries,
-    addPhaseSummary
+    updatePersona
   } = usePracticeStore()
 
   const [messages_, setMessages_] = useState<MessageItem[]>([])
-  const [aiAudioData, setAiAudioData] = useState<Uint8Array | null>(null)
   const [isSending, setIsSending] = useState(false)
   const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false)
   const [currentPhaseSummary, setCurrentPhaseSummary] = useState<PhaseSummaryData | null>(null)
   const [isSummaryLoading, setIsSummaryLoading] = useState(false)
 
+  // Track current AI message ID for audio chunk accumulation
+  const currentAIMessageIdRef = useRef<string | null>(null)
+
   // Audio streaming for TTS playback
   const audioStream = useAudioStream()
 
-  // Initialize with first AI message when session starts
-  useEffect(() => {
-    if (currentSession?.first_message && messages_.length === 0) {
-      const firstMsg: MessageItem = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        type: 'ai',
-        content: currentSession.first_message,
-        timestamp: new Date().toISOString()
-      }
-      setMessages_([firstMsg])
-    }
-  }, [currentSession?.first_message])
+  // First message comes from WebSocket (ai_message with empty audio_data,
+// then ai_message_audio with the audio). No local fallback - backend
+// always sends it.
 
-  // Build WebSocket URL
-  const wsUrl = currentSession?.id
-    ? `${import.meta.env.VITE_WS_URL || 'ws://localhost:8001'}/ws/practice/${currentSession.id}`
+  // 销售员自填的练习档案（从 practiceStore 传过来，banner 展示用）
+  const userContext = (selectedRoleConfig as any)?.__userContext as
+    | {
+        sales_level?: string
+        years_experience?: number
+        practice_goals?: string[]
+        difficulty?: string
+        notes?: string
+      }
+    | undefined
+
+  // Wait for session to be loaded from store before deciding to redirect.
+  // On first render, currentSession may be null while zustand rehydrates,
+  // so we wait one tick before redirecting to avoid an infinite navigation loop.
+  const [hasCheckedSession, setHasCheckedSession] = useState(false)
+  useEffect(() => {
+    const timer = setTimeout(() => setHasCheckedSession(true), 100)
+    return () => clearTimeout(timer)
+  }, [])
+  useEffect(() => {
+    if (hasCheckedSession && !currentSession?.id) {
+      navigate('/practice')
+    }
+  }, [hasCheckedSession, currentSession, navigate])
+
+  // Build WebSocket URL - 走 vite 代理（同页同源，自动跟随 vite.config.ts 的 target）
+  // 这样切换后端端口只改一处；硬编码 ws://localhost:8001 之前会绕过 proxy
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = currentSession?.id && currentSession.id.length > 10
+    ? `${wsProtocol}//${window.location.host}/ws/practice/${currentSession.id}`
     : null
 
-  const handleMessage = useCallback((wsMessage: WebSocketMessage) => {
+  const handleMessage = useCallback((wsMessage: StreamMessage) => {
     // Handle different message types from WebSocket
     if (wsMessage.type === 'user_message') {
       // User's own message - already added locally
       return
     }
 
-    if (wsMessage.type === 'ai_message' || wsMessage.type === 'ai_streaming_end') {
-      // Final AI message
-      const content = wsMessage.content || wsMessage.data?.content as string || ''
-      if (content) {
-        const newMessage: MessageItem = {
-          id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          type: 'ai',
-          content: content,
-          timestamp: wsMessage.timestamp || new Date().toISOString()
-        }
-        setMessages_(prev => [...prev, newMessage])
+    // Backend confirms the user message and includes the ASR transcript
+    // (so the local bubble can be updated with the canonical Chinese text).
+    if (wsMessage.type === 'user_message_ack') {
+      const targetId = wsMessage.id
+      const asrText = (wsMessage.data?.asr_text as string)
+        || (wsMessage as any).asr_text
+        || ''
+      const asrOk = (wsMessage.data?.asr_ok as boolean)
+        ?? (wsMessage as any).asr_ok
+        ?? false
+      console.log('[ACK] msg keys:', Object.keys(wsMessage), 'id:', wsMessage.id, 'data:', wsMessage.data, 'asr_text:', (wsMessage as any).asr_text)
+      // Replace the bubble content whenever the backend gives us text.
+      // - If ASR succeeded (asrOk=true), the bubble gets the real transcript.
+      // - If ASR failed (asrOk=false), the backend sends a "没听清" notice
+      //   so the user knows their message wasn't understood (instead of
+      //   staring at "语音消息（4秒）" forever).
+      // Don't replace user-typed text — only replace placeholder content.
+      // Placeholders: "语音消息（X秒）" / "[语音消息（X秒）]" /
+      //               "[系统：没听清...]" / "[系统：语音识别出错...]"
+      const isPlaceholder = content =>
+        !content ||
+        content.startsWith('[语音消息') ||
+        content.startsWith('语音消息（') ||
+        content.startsWith('[系统：')
+      if (targetId && asrText && asrText !== '[语音消息]') {
+        setMessages_(prev => prev.map(m => {
+          if (m.id !== targetId) {
+            return m
+          }
+          // Only overwrite if the current content is still a placeholder
+          // (don't clobber a transcript the user has since edited).
+          if (!isPlaceholder(m.content)) {
+            console.log('[ACK] skip msg (not placeholder):', m.content.slice(0, 30))
+            return m
+          }
+          console.log('[ACK] updating bubble', m.id, '→', asrText.slice(0, 30))
+          return { ...m, content: asrText }
+        }))
       }
+      return
+    }
+
+    if (wsMessage.type === 'ai_streaming_start') {
+      // AI response starting - create new message with empty audioData
+      const contentPrefix = wsMessage.content || wsMessage.data?.content_prefix as string || ''
+      const newMsgId = `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      currentAIMessageIdRef.current = newMsgId
+      const newMessage: MessageItem = {
+        id: newMsgId,
+        type: 'ai',
+        content: contentPrefix,
+        audioData: '', // Start with empty audio
+        timestamp: wsMessage.timestamp || new Date().toISOString()
+      }
+      setMessages_(prev => [...prev, newMessage])
+      return
+    }
+
+    if (wsMessage.type === 'ai_message' || wsMessage.type === 'ai_streaming_end') {
+      // Final AI message with audio from backend
+      const content = wsMessage.content || wsMessage.data?.content as string || ''
+      const audioData = wsMessage.audio_data || ''
+      // Backend can attach a freshly-generated persona on the first ai_message
+      const persona = (wsMessage as any).persona
+      if (persona && persona.name) {
+        updatePersona(persona)
+      }
+      if (content) {
+        const newMsgId = wsMessage.id || `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        currentAIMessageIdRef.current = newMsgId
+        // Pull knowledge_refs from the message (RAG context) so the chat UI
+        // can show "参考资料 (N)" footer under the AI bubble.
+        const knowledgeRefs = Array.isArray(wsMessage.knowledge_refs) ? wsMessage.knowledge_refs : []
+        // Upsert: if a message with this id already exists (e.g. placeholder → LLM text),
+        // update it; otherwise append.
+        setMessages_(prev => {
+          const existingIdx = prev.findIndex(m => m.id === newMsgId)
+          if (existingIdx >= 0) {
+            const updated = [...prev]
+            updated[existingIdx] = {
+              ...updated[existingIdx],
+              content,
+              audioData: audioData || updated[existingIdx].audioData,
+              knowledgeRefs: knowledgeRefs.length > 0 ? knowledgeRefs : updated[existingIdx].knowledgeRefs,
+              timestamp: wsMessage.timestamp || updated[existingIdx].timestamp
+            }
+            return updated
+          }
+          return [...prev, {
+            id: newMsgId,
+            type: 'ai' as const,
+            content,
+            audioData,
+            knowledgeRefs: knowledgeRefs.length > 0 ? knowledgeRefs : undefined,
+            timestamp: wsMessage.timestamp || new Date().toISOString()
+          }]
+        })
+
+        // Play audio if available (only on first appearance, not on upsert)
+        if (audioData && audioData.length > 0) {
+          audioStream.playStoredAudio(audioData)
+        }
+      }
+      return
+    }
+
+    // Audio update for an existing message (e.g. first message after TTS finishes)
+    if (wsMessage.type === 'ai_message_audio') {
+      const targetId = wsMessage.id
+      const audioData = wsMessage.audio_data || ''
+      if (targetId && audioData) {
+        setMessages_(prev => prev.map(m =>
+          m.id === targetId ? { ...m, audioData } : m
+        ))
+        // Play it once
+        audioStream.playStoredAudio(audioData)
+      }
+      return
     } else if (wsMessage.type === 'ai_streaming_update') {
       // Incremental streaming update - update the last AI message
       const contentPrefix = wsMessage.content || wsMessage.data?.content_prefix as string || ''
@@ -114,35 +254,27 @@ const PracticeChatPage = () => {
       }
     }
 
-    // Handle phase completion
-    if (wsMessage.type === 'phase_complete') {
-      updateSessionPhase(wsMessage.data?.phase as string || 'discovery')
-    }
+    // phase_complete 消息不再处理：硬性阶段切换已废弃
+    // （A1 改动：让对话按真实节奏走，AI 客户按自己判断回应）
 
     // Handle backchannel (listening acknowledgment)
     if (wsMessage.type === 'backchannel') {
       console.log('[Backchannel]', wsMessage.content)
     }
-  }, [updateSessionPhase])
+  }, [updateSessionPhase, updatePersona])
 
   const handleConnected = useCallback(() => {
     console.log('WebSocket connected')
-    // Send initial context to AI
-    if (selectedScenario && selectedRoleConfig) {
-      // Session context will be handled by backend
-    }
-  }, [selectedScenario, selectedRoleConfig])
+  }, [])
 
   const handleDisconnected = useCallback(() => {
     console.log('WebSocket disconnected')
   }, [])
 
-  const { isConnected, sendMessage: wsSendMessage, lastAudioChunk } = useWebSocket({
+  const { isConnected, sendMessage: wsSendMessage, sendStopPlayback, sendVoiceStart } = useWebSocket({
     url: wsUrl,
     onMessage: handleMessage,
     onAudioChunk: (chunk) => {
-      // Store the audio chunk for playback
-      setAiAudioData(chunk)
       // Play audio immediately when received
       audioStream.playChunk(chunk)
     },
@@ -150,12 +282,13 @@ const PracticeChatPage = () => {
     onDisconnected: handleDisconnected
   })
 
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, audioData?: string) => {
     // Add user message to local state
     const userMsg: MessageItem = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       type: 'user',
       content,
+      audioData: audioData || undefined,
       isSending: true,
       timestamp: new Date().toISOString()
     }
@@ -163,8 +296,8 @@ const PracticeChatPage = () => {
 
     setIsSending(true)
 
-    // Send via WebSocket
-    wsSendMessage(content)
+    // Send via WebSocket (include id so the ASR ack can be matched back)
+    wsSendMessage(content, audioData, userMsg.id, 'audio/webm')
 
     // Update message status to show sending
     setMessages_(prev => prev.map(m =>
@@ -172,6 +305,12 @@ const PracticeChatPage = () => {
     ))
     setIsSending(false)
   }, [wsSendMessage])
+
+  // OR-1: Handle stop playback (interrupt AI speech and notify server)
+  const handleStopPlayback = useCallback(() => {
+    audioStream.stop()
+    sendStopPlayback()  // Notify server to stop TTS
+  }, [audioStream, sendStopPlayback])
 
   // Get role configuration labels
   const getRoleLabel = (config: RoleConfig | null, key: keyof RoleConfig) => {
@@ -249,8 +388,25 @@ const PracticeChatPage = () => {
           </div>
         </div>
 
-        {/* AI Customer Persona */}
-        {selectedRoleConfig && (
+        {/* AI Customer Persona - shows concrete character (persona) when available */}
+        {currentSession?.persona ? (
+          <div className="flex items-center gap-3 px-4 py-2 bg-gray-50 rounded-lg max-w-md">
+            <div className="w-10 h-10 bg-secondary/10 rounded-full flex items-center justify-center flex-shrink-0">
+              <svg className="w-5 h-5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+              </svg>
+            </div>
+            <div className="text-sm min-w-0 flex-1">
+              <p className="font-medium text-gray-900 truncate">
+                {currentSession.persona.name} · {currentSession.persona.title}
+              </p>
+              <p className="text-gray-500 truncate">
+                {currentSession.persona.company}
+                {currentSession.persona.industry && ` · ${currentSession.persona.industry}`}
+              </p>
+            </div>
+          </div>
+        ) : selectedRoleConfig ? (
           <div className="flex items-center gap-3 px-4 py-2 bg-gray-50 rounded-lg">
             <div className="w-10 h-10 bg-secondary/10 rounded-full flex items-center justify-center">
               <svg className="w-5 h-5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -259,60 +415,65 @@ const PracticeChatPage = () => {
             </div>
             <div className="text-sm">
               <p className="font-medium text-gray-900">
-                {getRoleLabel(selectedRoleConfig, 'position_level')}
+                正在生成客户档案...
               </p>
               <p className="text-gray-500">
-                {getRoleLabel(selectedRoleConfig, 'personality')} · {getRoleLabel(selectedRoleConfig, 'decision_style')}
+                {getRoleLabel(selectedRoleConfig, 'position_level')} · {getRoleLabel(selectedRoleConfig, 'personality')}
               </p>
             </div>
           </div>
-        )}
+        ) : null}
       </header>
 
-      {/* Phase Progress */}
+      {/* 自由对话指示条（替代旧的硬性 5 阶段 SPIN 进度条） */}
       <div className="bg-white border-b border-gray-200 px-4 py-2">
-        <div className="flex items-center gap-2 overflow-x-auto">
-          <PhaseIndicator
-            label="开场破冰"
-            isActive={currentSession?.current_phase === 'opening'}
-            isCompleted={['discovery', 'needs', 'proposal', 'closing'].includes(currentSession?.current_phase || '')}
-          />
-          <div className="w-8 h-0.5 bg-gray-200" />
-          <PhaseIndicator
-            label="需求挖掘"
-            isActive={currentSession?.current_phase === 'discovery'}
-            isCompleted={['needs', 'proposal', 'closing'].includes(currentSession?.current_phase || '')}
-          />
-          <div className="w-8 h-0.5 bg-gray-200" />
-          <PhaseIndicator
-            label="方案呈现"
-            isActive={currentSession?.current_phase === 'needs'}
-            isCompleted={['proposal', 'closing'].includes(currentSession?.current_phase || '')}
-          />
-          <div className="w-8 h-0.5 bg-gray-200" />
-          <PhaseIndicator
-            label="促成成交"
-            isActive={currentSession?.current_phase === 'proposal'}
-            isCompleted={currentSession?.current_phase === 'closing'}
-          />
-          <div className="w-8 h-0.5 bg-gray-200" />
-          <PhaseIndicator
-            label="复盘总结"
-            isActive={currentSession?.current_phase === 'closing'}
-            isCompleted={false}
-          />
+        <div className="flex items-center gap-2 text-sm text-gray-600">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-50 text-green-700 rounded">
+            <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
+            自由对话中
+          </span>
+          {currentSession?.persona?.name && (
+            <span className="text-gray-500">
+              · 正在和【{currentSession.persona.name}】聊天
+            </span>
+          )}
+          {/* 销售员自填的练习档案徽章 */}
+          {userContext && (
+            <span className="text-gray-500 truncate">
+              {userContext.practice_goals?.length > 0 &&
+                `· 重点练: ${userContext.practice_goals.join('/')}`}
+              {userContext.difficulty && ` · 难度: ${userContext.difficulty}`}
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 overflow-hidden">
-        <ChatContainer
-          messages={messages_}
-          onSendMessage={handleSendMessage}
-          isDisabled={currentSession?.status === 'completed'}
-          isSending={isSending}
-          isConnected={isConnected}
-        />
+      {/* Chat Area with SPIN Stage Hint */}
+      <div className="flex-1 overflow-hidden flex">
+        <div className="flex-1">
+          <ChatContainer
+            messages={messages_}
+            customerLabel={
+              currentSession?.persona
+                ? `${currentSession.persona.name}${currentSession.persona.title ? '·' + currentSession.persona.title.split('经理')[0].split('总监')[0] : ''}`
+                : 'AI客户'
+            }
+            onSendMessage={handleSendMessage}
+            onVoiceStart={sendVoiceStart}
+            onVoiceEnd={() => {}}  // Handled in ChatInput
+            onStopPlayback={handleStopPlayback}
+            onPlayAudio={audioStream.playStoredAudio}
+            isDisabled={currentSession?.status === 'completed'}
+            isSending={isSending}
+            isConnected={isConnected}
+            isPlayingAudio={audioStream.isPlaying}
+          />
+        </div>
+        {/* OR-4: Real-time SPIN Stage Hint Sidebar */}
+        <div className="w-72 border-l border-gray-200 bg-gray-50 overflow-y-auto p-3">
+          <p className="text-xs font-medium text-gray-500 mb-3">实时SPIN指导</p>
+          <SpinStageHint phase={currentSession?.current_phase || 'opening'} />
+        </div>
       </div>
 
       {/* Summary Button */}
@@ -346,25 +507,5 @@ const PracticeChatPage = () => {
     </div>
   )
 }
-
-const PhaseIndicator = ({ label, isActive, isCompleted }: { label: string; isActive: boolean; isCompleted: boolean }) => (
-  <div className="flex items-center gap-2">
-    <div className={`
-      w-6 h-6 rounded-full flex items-center justify-center text-xs
-      ${isCompleted ? 'bg-success text-white' : isActive ? 'bg-primary text-white' : 'bg-gray-200 text-gray-500'}
-    `}>
-      {isCompleted ? (
-        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-        </svg>
-      ) : (
-        <span className="font-medium">{label[0]}</span>
-      )}
-    </div>
-    <span className={`text-sm whitespace-nowrap ${isActive ? 'text-primary font-medium' : 'text-gray-500'}`}>
-      {label}
-    </span>
-  </div>
-)
 
 export default PracticeChatPage

@@ -6,7 +6,7 @@
  * States: default / hover(轻微上浮) / selected(边框高亮) / disabled
  * Size: card width adaptive, spacing 16px
  */
-import { Scenario } from '../../api/practice'
+import { Scenario } from '@/api/practice'
 
 interface ScenarioCardProps {
   scenario: Scenario

@@ -1,49 +1,76 @@
 /**
- * ScoreChart Component
+ * ScoreChart Component — Radar chart for 6 维能力评估
  *
- * Radar chart showing scores across multiple dimensions:
- * - 沟通能力 (Communication)
- * - 说服能力 (Persuasion)
- * - 促成能力 (Closing)
- * - 扭转能力 (Spin)
+ * 维度定义（与 PrePracticeForm 的 practice_goals 对齐）：
+ * - 开场破冰
+ * - 需求挖掘
+ * - 产品呈现
+ * - 异议处理
+ * - 促成成交
+ * - 关系建立
+ *
+ * 接收 scores 字典 {维度名: 0-100分}，自适应渲染
  */
 import { useEffect, useRef } from 'react'
 
-interface ScoreData {
-  communication_score: number
-  persuasion_score: number
-  closing_score: number
-  spin_score: number
-}
+type ScoreData = Record<string, number | undefined | null>
 
 interface ScoreChartProps {
   scores: ScoreData
   size?: number
+  dimensions?: Array<{ key: string; label: string; color: string }>
 }
 
-const ScoreChart = ({ scores, size = 280 }: ScoreChartProps) => {
+const DEFAULT_DIMENSIONS = [
+  { key: 'opening',   label: '开场破冰', color: '#10B981' },
+  { key: 'discovery', label: '需求挖掘', color: '#3B82F6' },
+  { key: 'presentation', label: '产品呈现', color: '#F59E0B' },
+  { key: 'objection', label: '异议处理', color: '#EF4444' },
+  { key: 'closing',   label: '促成成交', color: '#8B5CF6' },
+  { key: 'rapport',   label: '关系建立', color: '#EC4899' },
+]
+
+// 把后端的 communication/persuasion/closing/spin 4 维映射到 6 维
+// (这是临时映射，等后端 /practice/sessions/{id}/summary 改成 6 维后就直接读)
+const LEGACY_KEY_MAP: Record<string, string> = {
+  'communication_score': 'opening',
+  'persuasion_score': 'discovery',
+  'closing_score': 'closing',
+  'spin_score': 'objection',
+}
+
+function resolveScore(scores: ScoreData, key: string): number {
+  if (typeof scores[key] === 'number') return scores[key] as number
+  // 兼容旧的 4 维字段
+  for (const [legacyKey, mappedKey] of Object.entries(LEGACY_KEY_MAP)) {
+    if (mappedKey === key && typeof scores[legacyKey] === 'number') {
+      return scores[legacyKey] as number
+    }
+  }
+  return 0
+}
+
+const ScoreChart = ({ scores, size = 320, dimensions = DEFAULT_DIMENSIONS }: ScoreChartProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
     const centerX = size / 2
     const centerY = size / 2
-    const radius = size / 2 - 40
+    const radius = size / 2 - 50  // 留更多空间给 label
 
-    // Clear canvas
     ctx.clearRect(0, 0, size, size)
 
-    // Draw background rings
-    const labels = ['沟通能力', '说服能力', '促成能力', '扭转能力']
-    const numAxes = labels.length
+    const numAxes = dimensions.length
     const angleStep = (2 * Math.PI) / numAxes
+    const labels = dimensions.map(d => d.label)
+    const scoreValues = dimensions.map(d => resolveScore(scores, d.key))
 
-    // Draw concentric rings
+    // 同心圆
     for (let ring = 1; ring <= 5; ring++) {
       const ringRadius = (radius * ring) / 5
       ctx.beginPath()
@@ -59,7 +86,7 @@ const ScoreChart = ({ scores, size = 280 }: ScoreChartProps) => {
       ctx.stroke()
     }
 
-    // Draw axes
+    // 轴线
     for (let i = 0; i < numAxes; i++) {
       const angle = i * angleStep - Math.PI / 2
       ctx.beginPath()
@@ -69,23 +96,21 @@ const ScoreChart = ({ scores, size = 280 }: ScoreChartProps) => {
       ctx.stroke()
     }
 
-    // Draw labels
-    ctx.font = '12px system-ui, sans-serif'
+    // 标签
+    ctx.font = '13px system-ui, sans-serif'
     ctx.fillStyle = '#374151'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
 
     for (let i = 0; i < numAxes; i++) {
       const angle = i * angleStep - Math.PI / 2
-      const labelRadius = radius + 25
+      const labelRadius = radius + 30
       const x = centerX + labelRadius * Math.cos(angle)
       const y = centerY + labelRadius * Math.sin(angle)
       ctx.fillText(labels[i], x, y)
     }
 
-    // Draw score polygon
-    const scoreValues = [scores.communication_score, scores.persuasion_score, scores.closing_score, scores.spin_score]
-
+    // 分数多边形
     ctx.beginPath()
     for (let i = 0; i <= numAxes; i++) {
       const idx = i % numAxes
@@ -97,52 +122,54 @@ const ScoreChart = ({ scores, size = 280 }: ScoreChartProps) => {
       else ctx.lineTo(x, y)
     }
     ctx.closePath()
-    ctx.fillStyle = 'rgba(37, 99, 235, 0.2)'
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.2)'
     ctx.fill()
-    ctx.strokeStyle = '#2563EB'
+    ctx.strokeStyle = '#3B82F6'
     ctx.lineWidth = 2
     ctx.stroke()
 
-    // Draw score points
+    // 数据点
     for (let i = 0; i < numAxes; i++) {
       const angle = i * angleStep - Math.PI / 2
       const value = (scoreValues[i] / 100) * radius
       const x = centerX + value * Math.cos(angle)
       const y = centerY + value * Math.sin(angle)
-
       ctx.beginPath()
       ctx.arc(x, y, 5, 0, 2 * Math.PI)
-      ctx.fillStyle = '#2563EB'
+      ctx.fillStyle = '#3B82F6'
       ctx.fill()
       ctx.strokeStyle = '#FFFFFF'
       ctx.lineWidth = 2
       ctx.stroke()
     }
 
-    // Draw center score
-    const overallScore = ((scores.communication_score + scores.persuasion_score + scores.closing_score + scores.spin_score) / 4).toFixed(1)
+    // 中心综合分
+    const validScores = scoreValues.filter(s => s > 0)
+    const overallScore = validScores.length > 0
+      ? (validScores.reduce((a, b) => a + b, 0) / validScores.length).toFixed(1)
+      : '0'
     ctx.font = 'bold 32px system-ui, sans-serif'
-    ctx.fillStyle = '#2563EB'
+    ctx.fillStyle = '#3B82F6'
     ctx.fillText(overallScore, centerX, centerY - 8)
     ctx.font = '12px system-ui, sans-serif'
     ctx.fillStyle = '#6B7280'
     ctx.fillText('综合得分', centerX, centerY + 16)
-  }, [scores, size])
+  }, [scores, size, dimensions])
 
   return (
     <div className="flex flex-col items-center">
       <canvas ref={canvasRef} width={size} height={size} className="max-w-full" />
-      <div className="grid grid-cols-2 gap-4 mt-4 w-full px-8">
-        {[
-          { label: '沟通能力', value: scores.communication_score, color: '#2563EB' },
-          { label: '说服能力', value: scores.persuasion_score, color: '#7C3AED' },
-          { label: '促成能力', value: scores.closing_score, color: '#059669' },
-          { label: '扭转能力', value: scores.spin_score, color: '#DC2626' }
-        ].map(item => (
-          <div key={item.label} className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }} />
-            <span className="text-sm text-gray-600">{item.label}</span>
-            <span className="text-sm font-semibold text-gray-900 ml-auto">{item.value}</span>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2 mt-4 w-full px-4">
+        {dimensions.map((dim) => (
+          <div key={dim.key} className="flex items-center gap-2 text-sm">
+            <div
+              className="w-3 h-3 rounded-full flex-shrink-0"
+              style={{ backgroundColor: dim.color }}
+            />
+            <span className="text-gray-600 truncate">{dim.label}</span>
+            <span className="text-sm font-semibold text-gray-900 ml-auto">
+              {resolveScore(scores, dim.key)}
+            </span>
           </div>
         ))}
       </div>

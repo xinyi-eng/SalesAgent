@@ -1,0 +1,41 @@
+# SalesAgent 后端 Python 依赖
+# 锁定主要版本，构建时再 pip install
+
+# Web 框架
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+python-multipart==0.0.20
+
+# 数据
+SQLAlchemy==2.0.48
+alembic==1.14.0
+pydantic==2.13.4
+pydantic-settings==2.13.1
+
+# 认证
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# 定时任务
+APScheduler==3.11.2
+
+# HTTP / WebSocket
+httpx==0.28.1
+websockets==16.0
+
+# 向量 / Embedding
+chromadb==1.5.9
+sentence-transformers==3.0.1
+
+# ASR / TTS
+faster-whisper==1.2.1
+
+# 文件解析 / 报告生成
+pypdf==6.10.2
+reportlab==4.4.10
+pillow==12.0.0
+beautifulsoup4==4.14.2
+
+# LLM SDK
+openai==1.99.0

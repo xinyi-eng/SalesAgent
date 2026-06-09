@@ -5,10 +5,12 @@
  * - Position Level (岗位级别): 初级的客户经理 / 中级的采购经理 / 高级的总监
  * - Personality (性格): 理性型 / 感性型 / 犹豫型 / 果断型
  * - Decision Style (决策风格): 价格导向 / 价值导向 / 关系导向 / 风险规避
+ * - Voice (声线): TTS voice selection with preview
  *
  * States: default / selected / disabled
  */
-import { RoleConfig } from '../../api/practice'
+import { RoleConfig } from '@/api/practice'
+import VoiceSelector, { VOICE_OPTIONS } from './VoiceSelector'
 
 interface RoleSelectorProps {
   selectedConfig: RoleConfig | null
@@ -103,6 +105,24 @@ const RoleSelector = ({ selectedConfig, onChange, isDisabled = false }: RoleSele
         {renderOptions(decisionStyles, 'decision_style')}
       </div>
 
+      {/* Voice Selection */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-3">
+          AI客户声线
+        </label>
+        <VoiceSelector
+          selectedVoice={selectedConfig?.voice || null}
+          onChange={(voice) => onChange({
+            ...(selectedConfig || { position_level: '', personality: '', decision_style: '' }),
+            voice
+          } as RoleConfig)}
+          positionLevel={selectedConfig?.position_level}
+          personality={selectedConfig?.personality}
+          decisionStyle={selectedConfig?.decision_style}
+          isDisabled={isDisabled}
+        />
+      </div>
+
       {/* Preview */}
       {isComplete && (
         <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
@@ -117,6 +137,11 @@ const RoleSelector = ({ selectedConfig, onChange, isDisabled = false }: RoleSele
             <span className="inline-flex items-center px-3 py-1 rounded-full text-sm bg-success/10 text-success">
               {decisionStyles.find(d => d.value === selectedConfig?.decision_style)?.label}
             </span>
+            {selectedConfig?.voice && (
+              <span className="inline-flex items-center px-3 py-1 rounded-full text-sm bg-warning/10 text-warning">
+                {VOICE_OPTIONS.find(v => v.id === selectedConfig.voice)?.name || selectedConfig.voice}
+              </span>
+            )}
           </div>
         </div>
       )}

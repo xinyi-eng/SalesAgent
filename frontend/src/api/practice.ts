@@ -23,6 +23,7 @@ export interface RoleConfig {
   position_level: string
   personality: string
   decision_style: string
+  voice: string  // TTS voice_id for AI customer
 }
 
 export interface SessionCreateResponse {
@@ -133,10 +134,19 @@ const api = {
   /**
    * 创建对练会话
    */
-  async createSession(scenarioId: string, roleConfig: RoleConfig): Promise<SessionCreateResponse> {
+  async createSession(
+    scenarioId: string,
+    roleConfig: RoleConfig,
+    customerContext?: any,
+    investigationResult?: any,
+    userContext?: any
+  ): Promise<SessionCreateResponse> {
     const response = await axios.post(`${API_BASE}/practice/sessions`, {
       scenario_id: scenarioId,
-      role_config: roleConfig
+      role_config: roleConfig,
+      customer_context: customerContext,
+      investigation_result: investigationResult,
+      user_context: userContext,
     })
     return response.data
   },
@@ -154,6 +164,25 @@ const api = {
   async getSessionSummary(sessionId: string): Promise<SessionSummary> {
     const response = await axios.get(`${API_BASE}/practice/sessions/${sessionId}/summary`)
     return response.data
+  },
+
+  /**
+   * 下载会话报告 PDF（触发浏览器下载）
+   */
+  async downloadReportPdf(sessionId: string): Promise<void> {
+    const response = await axios.get(
+      `${API_BASE}/practice/sessions/${sessionId}/report/pdf`,
+      { responseType: 'blob' }
+    )
+    const blob = new Blob([response.data], { type: 'application/pdf' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `salesagent-report-${sessionId.slice(0, 8)}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
   },
 
   /**

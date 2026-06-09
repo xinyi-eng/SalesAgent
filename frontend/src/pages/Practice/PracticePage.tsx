@@ -7,16 +7,22 @@
  * Story: 1.1 场景选择与配置
  */
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { usePracticeStore } from '../../stores/practiceStore'
+import { useSpinStore } from '../../stores/spinStore'
+import { useAuth } from '../../contexts/AuthContext'
 import { RoleConfig } from '../../api/practice'
 import ScenarioCard from '../../components/business/practice/ScenarioCard'
 import RoleSelector from '../../components/business/practice/RoleSelector'
+import PrePracticeForm, { UserContext } from '../../components/business/practice/PrePracticeForm'
 
-type Step = 'select' | 'configure' | 'ready'
+type Step = 'select' | 'configure' | 'fillUserContext' | 'ready'
 
 const PracticePage = () => {
   const navigate = useNavigate()
+  const location = useLocation()
+  const spinStore = useSpinStore()
+  const { user } = useAuth()
   const {
     scenarios,
     selectedScenario,
@@ -33,6 +39,8 @@ const PracticePage = () => {
   const [currentStep, setCurrentStep] = useState<Step>('select')
   const [isStarting, setIsStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  const [userContext, setUserContext] = useState<UserContext | null>(null)
+  const [showUserContextForm, setShowUserContextForm] = useState(false)
 
   useEffect(() => {
     fetchScenarios()
@@ -62,18 +70,34 @@ const PracticePage = () => {
   const handleStartPractice = async () => {
     if (!selectedScenario || !selectedRoleConfig) return
 
+    // 必须先填销售员档案（userContext）
+    if (!userContext) {
+      setShowUserContextForm(true)
+      return
+    }
+
     setIsStarting(true)
     setStartError(null)
 
     try {
-      await startSession()
-      // WebSocket connection will be handled in subsequent stories
+      const spinState = location.state as { customerContext?: any; investigationResult?: any } | null
+      const customerContext = spinState?.customerContext || spinStore.customerContext
+      const investigationResult = spinState?.investigationResult || spinStore.investigationResult
+
+      await startSession({ customerContext, investigationResult, userContext })
       setCurrentStep('ready')
     } catch (error) {
       setStartError(error instanceof Error ? error.message : '启动对练失败')
     } finally {
       setIsStarting(false)
     }
+  }
+
+  const handleUserContextSubmit = (ctx: UserContext) => {
+    setUserContext(ctx)
+    setShowUserContextForm(false)
+    // 立即触发开始
+    setTimeout(() => handleStartPractice(), 50)
   }
 
   const handleReset = () => {
@@ -187,11 +211,20 @@ const PracticePage = () => {
                   }
                 `}
               >
-                {isStarting ? '准备中...' : '开始对练'}
+                {isStarting ? '准备中...' : '下一步：填写销售员档案 →'}
               </button>
             </div>
           </div>
         )}
+
+      {/* 销售员档案填写弹窗（点"开始对练"后弹出） */}
+      {showUserContextForm && (
+        <PrePracticeForm
+          defaultName={user?.full_name || user?.username || ''}
+          onSubmit={handleUserContextSubmit}
+          onCancel={() => setShowUserContextForm(false)}
+        />
+      )}
 
         {/* Step 3: Ready State */}
         {currentStep === 'ready' && (

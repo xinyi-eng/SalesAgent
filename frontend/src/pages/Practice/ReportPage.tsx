@@ -13,20 +13,42 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import api from '../../api/practice'
 
-interface SpinScores {
-  situation_score: number
-  problem_score: number
-  implication_score: number
-  need_payoff_score: number
+interface KnowledgeRef {
+  category?: string
+  source?: string
+  chapter?: string
+  section?: string
+  excerpt?: string
+  relevance?: number
+}
+
+/**
+ * 单维度的 LLM 评价字段：销售说了什么 / 评分原因 / KB 引用 / 改进建议
+ */
+interface StageDetail {
+  quote?: string       // 销售员实际说的原话
+  analysis?: string    // 评分原因
+  reference?: string   // 知识库引用
+  suggestion?: string  // 改进建议
 }
 
 interface ReportData {
   session_id: string
   overall_score: number
-  spin_scores: SpinScores
+  situation_score: number
+  problem_score: number
+  implication_score: number
+  need_payoff_score: number
+  // 4 维度 × 4 字段（来自 LLM 真实输出）
+  situation?: StageDetail
+  problem?: StageDetail
+  implication?: StageDetail
+  need_payoff?: StageDetail
+  // 综合反馈
   key_strengths: string[]
   areas_for_improvement: string[]
   next_practice_focus: string
+  knowledge_refs?: KnowledgeRef[]
 }
 
 export default function ReportPage() {
@@ -59,6 +81,20 @@ export default function ReportPage() {
 
   const handleBackToPractice = () => {
     navigate('/practice')
+  }
+
+  const [downloadingPdf, setDownloadingPdf] = useState(false)
+  const handleDownloadPdf = async () => {
+    if (!session_id) return
+    setDownloadingPdf(true)
+    try {
+      await api.downloadReportPdf(session_id)
+    } catch (err) {
+      console.error('PDF download failed:', err)
+      alert('PDF 下载失败，请稍后重试')
+    } finally {
+      setDownloadingPdf(false)
+    }
   }
 
   if (loading) {
@@ -117,10 +153,10 @@ export default function ReportPage() {
               <div className="flex-1 bg-gray-200 rounded-full h-4 mx-4">
                 <div
                   className="bg-green-500 h-4 rounded-full transition-all"
-                  style={{ width: `${(report.spin_scores?.situation_score || 0) * 10}%` }}
+                  style={{ width: `${(report.situation_score || 0) * 10}%` }}
                 />
               </div>
-              <span className="w-16 text-right text-gray-600">{report.spin_scores?.situation_score || 0}/10</span>
+              <span className="w-16 text-right text-gray-600">{report.situation_score || 0}/10</span>
             </div>
 
             <div className="flex items-center">
@@ -128,10 +164,10 @@ export default function ReportPage() {
               <div className="flex-1 bg-gray-200 rounded-full h-4 mx-4">
                 <div
                   className="bg-blue-500 h-4 rounded-full transition-all"
-                  style={{ width: `${(report.spin_scores?.problem_score || 0) * 10}%` }}
+                  style={{ width: `${(report.problem_score || 0) * 10}%` }}
                 />
               </div>
-              <span className="w-16 text-right text-gray-600">{report.spin_scores?.problem_score || 0}/10</span>
+              <span className="w-16 text-right text-gray-600">{report.problem_score || 0}/10</span>
             </div>
 
             <div className="flex items-center">
@@ -139,10 +175,10 @@ export default function ReportPage() {
               <div className="flex-1 bg-gray-200 rounded-full h-4 mx-4">
                 <div
                   className="bg-yellow-500 h-4 rounded-full transition-all"
-                  style={{ width: `${(report.spin_scores?.implication_score || 0) * 10}%` }}
+                  style={{ width: `${(report.implication_score || 0) * 10}%` }}
                 />
               </div>
-              <span className="w-16 text-right text-gray-600">{report.spin_scores?.implication_score || 0}/10</span>
+              <span className="w-16 text-right text-gray-600">{report.implication_score || 0}/10</span>
             </div>
 
             <div className="flex items-center">
@@ -150,11 +186,72 @@ export default function ReportPage() {
               <div className="flex-1 bg-gray-200 rounded-full h-4 mx-4">
                 <div
                   className="bg-purple-500 h-4 rounded-full transition-all"
-                  style={{ width: `${(report.spin_scores?.need_payoff_score || 0) * 10}%` }}
+                  style={{ width: `${(report.need_payoff_score || 0) * 10}%` }}
                 />
               </div>
-              <span className="w-16 text-right text-gray-600">{report.spin_scores?.need_payoff_score || 0}/10</span>
+              <span className="w-16 text-right text-gray-600">{report.need_payoff_score || 0}/10</span>
             </div>
+          </div>
+        </div>
+
+        {/* SPIN 4 维度详细评价（来自 LLM 真实输出） */}
+        <div className="bg-white rounded-2xl shadow-sm p-6 mb-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">📋 SPIN 四维详细评价</h3>
+          <div className="space-y-4">
+            {[
+              { key: 'situation', label: 'S-现状探询', color: 'green',
+                desc: '询问客户当前背景、规模、痛点' },
+              { key: 'problem', label: 'P-难点发掘', color: 'blue',
+                desc: '挖出客户具体的不满和困难' },
+              { key: 'implication', label: 'I-暗示后果', color: 'yellow',
+                desc: '放大问题的影响和代价' },
+              { key: 'need_payoff', label: 'N-价值呈现', color: 'purple',
+                desc: '让客户自己说解决后的价值' },
+            ].map((stage) => {
+              const detail = (report as any)[stage.key] as StageDetail | undefined
+              if (!detail) return null
+              return (
+                <details
+                  key={stage.key}
+                  className="border border-gray-200 rounded-lg p-4 group"
+                >
+                  <summary className="cursor-pointer list-none flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full bg-${stage.color}-500`} />
+                      <span className="font-medium text-gray-800">{stage.label}</span>
+                      <span className="text-xs text-gray-500">- {stage.desc}</span>
+                    </div>
+                    <span className="text-xs text-gray-400 group-open:rotate-180 transition-transform">▼</span>
+                  </summary>
+                  <div className="mt-3 space-y-2 text-sm">
+                    {detail.quote && (
+                      <div className="bg-blue-50 border-l-2 border-blue-400 p-2">
+                        <div className="text-xs text-blue-600 font-medium mb-1">📌 销售员原话</div>
+                        <div className="text-gray-700 italic">"{detail.quote}"</div>
+                      </div>
+                    )}
+                    {detail.analysis && (
+                      <div>
+                        <div className="text-xs text-gray-500 font-medium">💡 评分原因</div>
+                        <div className="text-gray-700">{detail.analysis}</div>
+                      </div>
+                    )}
+                    {detail.reference && (
+                      <div className="bg-amber-50 border-l-2 border-amber-400 p-2">
+                        <div className="text-xs text-amber-700 font-medium mb-1">📚 知识库依据</div>
+                        <div className="text-gray-700">{detail.reference}</div>
+                      </div>
+                    )}
+                    {detail.suggestion && (
+                      <div className="bg-green-50 border-l-2 border-green-400 p-2">
+                        <div className="text-xs text-green-700 font-medium mb-1">✅ 改进建议</div>
+                        <div className="text-gray-700">{detail.suggestion}</div>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )
+            })}
           </div>
         </div>
 
@@ -210,13 +307,82 @@ export default function ReportPage() {
           </p>
         </div>
 
+        {/* 知识库引用（RAG）：本场对练中 AI 客户的话术依据 */}
+        {report.knowledge_refs && report.knowledge_refs.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-sm p-6 mb-6">
+            <h3 className="text-lg font-semibold text-secondary mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.186 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+              AI 客户的话术依据 ({report.knowledge_refs.length} 条)
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              以下是本场对练中 AI 客户引用的销售知识库条目（依据相关度排序）
+            </p>
+            <div className="space-y-3">
+              {report.knowledge_refs.map((ref, idx) => (
+                <div
+                  key={idx}
+                  className="border border-secondary/20 rounded-lg p-4 bg-secondary/5"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-secondary text-white text-xs font-medium flex-shrink-0">
+                      {idx + 1}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-800">
+                        {ref.source || '知识库'}
+                        {ref.chapter ? ` · ${ref.chapter}` : ''}
+                        {ref.section ? ` · ${ref.section}` : ''}
+                      </div>
+                      {ref.category && (
+                        <div className="mt-1 text-xs text-gray-500">
+                          分类: {ref.category}
+                          {ref.relevance != null && ` · 相关度 ${(ref.relevance * 100).toFixed(0)}%`}
+                        </div>
+                      )}
+                      {ref.excerpt && (
+                        <div className="mt-2 text-sm text-gray-700 leading-relaxed">
+                          {ref.excerpt}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* 操作按钮 */}
-        <div className="flex justify-center gap-4">
+        <div className="flex justify-center gap-4 flex-wrap">
           <button
             onClick={handleBackToPractice}
             className="px-6 py-3 bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors font-medium"
           >
             返回继续练习
+          </button>
+          <button
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf}
+            className="px-6 py-3 bg-secondary text-white rounded-xl hover:bg-secondary/90 transition-colors font-medium flex items-center gap-2 disabled:opacity-60"
+          >
+            {downloadingPdf ? (
+              <>
+                <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                  <path fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                </svg>
+                正在生成 PDF...
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                导出 PDF
+              </>
+            )}
           </button>
         </div>
       </div>

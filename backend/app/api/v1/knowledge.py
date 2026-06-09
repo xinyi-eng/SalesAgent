@@ -93,12 +93,38 @@ async def search_knowledge(request: KnowledgeSearchRequest):
         # Generate query embedding
         query_embedding = await _embedding_service.embed_text(request.query)
 
-        # Search vector store
+        # Pull a generous candidate set (5x top_k) so dedup has room
+        # to swap in distinct chunks at the same source.
+        candidate_k = max(request.top_k * 5, request.top_k)
         results = _vector_store.search(
             query_embedding=query_embedding,
-            top_k=request.top_k,
+            top_k=candidate_k,
             source_filter=request.source_filter
         )
+
+        # De-duplicate: the same chunk_id from chroma often shows up multiple
+        # times for tiny text fragments (e.g. identical HTML noise). Prefer
+        # the longest text per chunk_id.
+        seen_ids: dict = {}
+        for r in results:
+            cid = r.get("id")
+            prev = seen_ids.get(cid)
+            if prev is None or len(r.get("text", "")) > len(prev.get("text", "")):
+                seen_ids[cid] = r
+
+        # Also dedup by (source, chapter, normalized head) so different
+        # chunks from the same chapter don't crowd out diversity.
+        seen_keys: set = set()
+        deduped: list = []
+        for r in sorted(seen_ids.values(), key=lambda x: -x.get("score", 0)):
+            text_head = (r.get("text", "") or "")[:80]
+            key = (r.get("source", ""), r.get("metadata", {}).get("chapter", ""), text_head)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(r)
+            if len(deduped) >= request.top_k:
+                break
 
         # Convert to response format
         search_results = [
@@ -109,7 +135,7 @@ async def search_knowledge(request: KnowledgeSearchRequest):
                 score=r["score"],
                 metadata=r.get("metadata", {})
             )
-            for r in results
+            for r in deduped
         ]
 
         return KnowledgeSearchResponse(

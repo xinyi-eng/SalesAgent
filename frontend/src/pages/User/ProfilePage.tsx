@@ -11,64 +11,82 @@
  */
 import { useState, useEffect } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
+import profileApi, { UserStats as ApiUserStats } from '../../api/profile'
+import authApi from '../../api/auth'
+import practiceApi, { SessionListItem } from '../../api/practice'
 import ScoreChart from '../../components/business/practice/ScoreChart'
 
-interface UserStats {
-  total_practice_sessions: number
-  total_practice_time: number
-  average_scores: {
-    communication: number
-    persuasion: number
-    closing: number
-    spin: number
-  }
-  strongest_skill: string
-  weakest_skill: string
-}
+interface UserStats extends ApiUserStats {}
 
 const SKILL_LABELS: Record<string, string> = {
   communication: '沟通能力',
   persuasion: '说服能力',
   closing: '促成能力',
-  spin: '扭转能力'
+  spin: '扭转能力',
+  // 6 维扩展
+  opening: '开场破冰',
+  discovery: '需求挖掘',
+  presentation: '产品呈现',
+  objection: '异议处理',
+  rapport: '关系建立',
 }
 
 const ProfilePage = () => {
-  const { user } = useAuth()
+  const { user, refreshUser } = useAuth()
   const [stats, setStats] = useState<UserStats | null>(null)
+  const [recentSessions, setRecentSessions] = useState<SessionListItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({
     fullName: user?.full_name || '',
-    bio: ''
+    bio: user?.bio || ''
   })
 
   useEffect(() => {
-    // Simulate loading stats
-    const loadStats = async () => {
-      setIsLoading(true)
-      await new Promise(resolve => setTimeout(resolve, 800))
-      setStats({
-        total_practice_sessions: 24,
-        total_practice_time: 360,
-        average_scores: {
-          communication: 82,
-          persuasion: 75,
-          closing: 70,
-          spin: 85
-        },
-        strongest_skill: 'spin',
-        weakest_skill: 'closing'
-      })
-      setIsLoading(false)
-    }
     loadStats()
   }, [])
 
+  const loadStats = async () => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      // 并行拉统计和最近 3 个 session
+      const [statsData, sessionsData] = await Promise.all([
+        profileApi.getStats(),
+        practiceApi.getSessions({ page: 1, page_size: 3 }),
+      ])
+      setStats(statsData)
+      setRecentSessions(sessionsData.data || [])
+    } catch (err: any) {
+      console.error('Failed to load profile stats:', err)
+      setError(err?.response?.data?.detail || err?.message || '加载用户统计失败')
+      setStats(null)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
   const handleSaveProfile = async () => {
-    // In production, call API
-    await new Promise(resolve => setTimeout(resolve, 500))
-    setIsEditing(false)
+    if (!user) return
+    setIsSaving(true)
+    setSaveError(null)
+    try {
+      await authApi.updateMe({
+        full_name: editForm.fullName,
+        bio: editForm.bio,
+      })
+      // 触发 AuthContext 重新拉 /auth/me 刷新 user
+      await refreshUser()
+      setIsEditing(false)
+    } catch (err: any) {
+      console.error('Failed to save profile:', err)
+      setSaveError(err?.response?.data?.detail || err?.message || '保存失败')
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   if (isLoading) {
@@ -137,70 +155,93 @@ const ProfilePage = () => {
           ))}
         </div>
 
-        {/* Radar Chart */}
+        {/* Radar Chart — 6 维度（用真实数据，从 stats.average_scores 拉） */}
         <div className="bg-white rounded-xl p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-gray-900 mb-6">能力雷达图</h2>
           <div className="flex justify-center">
             <ScoreChart
               scores={{
-                communication_score: stats?.average_scores.communication || 0,
-                persuasion_score: stats?.average_scores.persuasion || 0,
-                closing_score: stats?.average_scores.closing || 0,
-                spin_score: stats?.average_scores.spin || 0
+                // 优先用新的 6 维字段，没有就 fallback 到旧的 4 维
+                opening: stats?.average_scores?.opening ?? stats?.average_scores?.communication ?? 0,
+                discovery: stats?.average_scores?.discovery ?? stats?.average_scores?.persuasion ?? 0,
+                presentation: stats?.average_scores?.presentation ?? 0,
+                objection: stats?.average_scores?.objection ?? stats?.average_scores?.spin ?? 0,
+                closing: stats?.average_scores?.closing ?? 0,
+                rapport: stats?.average_scores?.rapport ?? 0,
               }}
               size={300}
             />
           </div>
         </div>
 
-        {/* Skills Self-Assessment */}
+        {/* Skills Self-Assessment — 横向卡片布局，每张卡片内含名称+进度条+分数 */}
         <div className="bg-white rounded-xl p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">自我评估</h2>
+          <h2 className="text-lg font-semibold text-gray-900 mb-2">自我评估</h2>
           <p className="text-sm text-gray-500 mb-4">
-            滑动调整您的各项技能熟练度
+            系统根据您的对练记录自动评估各项能力
           </p>
-          <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {Object.entries(SKILL_LABELS).map(([key, label]) => {
-              const score = stats?.average_scores[key as keyof typeof stats.average_scores] || 0
+              const score = stats?.average_scores?.[key as keyof typeof stats.average_scores] || 0
               return (
-                <div key={key} className="flex items-center gap-4">
-                  <span className="w-24 text-sm text-gray-700">{label}</span>
-                  <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  key={key}
+                  className="border border-gray-200 rounded-lg p-4 flex flex-col gap-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-900">{label}</span>
+                    <span className="text-2xl font-bold text-primary">{score}</span>
+                  </div>
+                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-primary rounded-full transition-all"
                       style={{ width: `${score}%` }}
                     />
                   </div>
-                  <span className="w-10 text-sm font-medium text-gray-900 text-right">{score}</span>
+                  <p className="text-xs text-gray-400">满分 100</p>
                 </div>
               )
             })}
           </div>
         </div>
 
-        {/* Recent Activity */}
+        {/* Recent Activity — 真实从 sessions-list 拉取，不再 hardcode */}
         <div className="bg-white rounded-xl p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">最近活动</h2>
-          <div className="space-y-4">
-            {[
-              { date: '2024-01-15', action: '完成练习', detail: 'CRM系统需求挖掘 - 82分' },
-              { date: '2024-01-14', action: '生成报告', detail: 'ERP报价谈判 - 复盘报告' },
-              { date: '2024-01-13', action: '开始练习', detail: '陌拜电话 - 开场破冰' }
-            ].map((item, idx) => (
-              <div key={idx} className="flex items-center gap-4 p-3 bg-gray-50 rounded-lg">
-                <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center">
-                  <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                  </svg>
-                </div>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-gray-900">{item.action}</p>
-                  <p className="text-sm text-gray-500">{item.detail}</p>
-                </div>
-                <span className="text-xs text-gray-400">{item.date}</span>
-              </div>
-            ))}
-          </div>
+          {recentSessions.length === 0 ? (
+            <div className="text-center py-6 text-sm text-gray-500">
+              暂无练习记录
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {recentSessions.map((s) => {
+                const action = s.status === 'completed' ? '完成练习' : s.status === 'active' ? '进行中' : '开始练习'
+                const detail = s.score != null
+                  ? `${s.scenario_name || '对练'} - ${s.score}分`
+                  : s.scenario_name || '对练'
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => window.location.assign(`/practice/review?sessionId=${s.id}`)}
+                    className="flex items-center gap-4 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100"
+                  >
+                    <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center">
+                      <svg className="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900">{action}</p>
+                      <p className="text-sm text-gray-500 truncate">{detail}</p>
+                    </div>
+                    <span className="text-xs text-gray-400">
+                      {new Date(s.created_at).toLocaleDateString('zh-CN')}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       </main>
 

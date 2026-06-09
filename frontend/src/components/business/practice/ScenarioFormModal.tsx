@@ -2,7 +2,7 @@
  * ScenarioFormModal Component - Create/Edit scenario modal
  */
 import { useState } from 'react'
-import { Scenario } from '../../api/practice'
+import { Scenario } from '@/api/practice'
 
 interface ScenarioFormModalProps {
   isOpen: boolean

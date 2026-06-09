@@ -42,10 +42,18 @@ async def get_user_profile(
         for s in sessions
     )
 
-    # Get recent scores
-    summaries = db.query(PracticeSummary).filter(
-        PracticeSummary.user_id == current_user.id
-    ).order_by(PracticeSummary.created_at.desc()).limit(10).all()
+    # Get recent scores — PracticeSummary 没有 user_id 列，只能通过 session 关联
+    user_session_ids = [s.id for s in sessions]
+    if user_session_ids:
+        summaries = (
+            db.query(PracticeSummary)
+            .filter(PracticeSummary.session_id.in_(user_session_ids))
+            .order_by(PracticeSummary.created_at.desc())
+            .limit(10)
+            .all()
+        )
+    else:
+        summaries = []
 
     avg_scores = {}
     if summaries:
@@ -113,10 +121,18 @@ async def get_user_stats(
         if s.started_at and s.ended_at:
             total_time += (s.ended_at - s.started_at).seconds / 60
 
-    # Get summary data
-    recent_summaries = db.query(PracticeSummary).filter(
-        PracticeSummary.user_id == current_user.id
-    ).order_by(PracticeSummary.created_at.desc()).limit(20).all()
+    # Get summary data — PracticeSummary 没有 user_id 列，通过 session 关联
+    user_session_ids = [s.id for s in all_sessions]
+    if user_session_ids:
+        recent_summaries = (
+            db.query(PracticeSummary)
+            .filter(PracticeSummary.session_id.in_(user_session_ids))
+            .order_by(PracticeSummary.created_at.desc())
+            .limit(20)
+            .all()
+        )
+    else:
+        recent_summaries = []
 
     avg_scores = {}
     if recent_summaries:

@@ -11,11 +11,18 @@ interface UseAudioRecorderReturn {
   isVoiceDetected: boolean
   audioLevel: number
   startRecording: () => Promise<void>
-  stopRecording: () => Promise<string>
+  stopRecording: () => Promise<RecordedAudio>
   playAudio: (base64Audio: string) => void
   stopPlaying: () => void
   stopVAD: () => void
   setVADOptions: (options: { vadThreshold?: number; silenceThreshold?: number }) => void
+}
+
+export interface RecordedAudio {
+  /** Base64 encoded audio data (webm/opus) */
+  audio: string
+  /** Length of the recording in milliseconds */
+  durationMs: number
 }
 
 export function useAudioRecorder(): UseAudioRecorderReturn {
@@ -30,6 +37,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   const animationFrameRef = useRef<number | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const recordingStartRef = useRef<number | null>(null)
 
   const { isVoiceDetected, startVAD, stopVAD: stopVADDetection, setOptions: setVADOptions } = useVAD()
 
@@ -46,6 +54,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   }, [isRecording])
 
   const startRecording = useCallback(async () => {
+    const startTime = Date.now()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -56,6 +65,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       })
 
       streamRef.current = stream
+      recordingStartRef.current = startTime
 
       // Set up audio analysis for level meter
       audioContextRef.current = new AudioContext()
@@ -89,9 +99,11 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     }
   }, [updateAudioLevel, startVAD])
 
-  const stopRecording = useCallback(async (): Promise<string> => {
+  const stopRecording = useCallback(async (): Promise<RecordedAudio> => {
     return new Promise((resolve, reject) => {
-      if (!mediaRecorderRef.current || !isRecording) {
+      // Use the ref-backed recorder (state-based `isRecording` may be stale
+      // in fast mousedown/mouseup sequences).
+      if (!mediaRecorderRef.current) {
         reject(new Error('Not recording'))
         return
       }
@@ -124,7 +136,10 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
           const arrayBuffer = await audioBlob.arrayBuffer()
           const base64 = arrayBufferToBase64(arrayBuffer)
-          resolve(base64)
+          const durationMs = recordingStartRef.current
+            ? Date.now() - recordingStartRef.current
+            : 0
+          resolve({ audio: base64, durationMs })
 
         } catch (error) {
           reject(error)
@@ -133,7 +148,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
       mediaRecorderRef.current.stop()
     })
-  }, [isRecording, stopVADDetection])
+  }, [stopVADDetection])
 
   const playAudio = useCallback((base64Audio: string) => {
     if (audioElementRef.current) {
@@ -141,23 +156,108 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       audioElementRef.current = null
     }
 
-    const binaryString = atob(base64Audio)
-    const bytes = new Uint8Array(binaryString.length)
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i)
+    if (!base64Audio || base64Audio.length === 0) {
+      console.error('[Replay] No audio data to play')
+      return
     }
 
-    const blob = new Blob([bytes], { type: 'audio/mp3' })
-    const url = URL.createObjectURL(blob)
+    console.log('[Replay] Playing audio, length:', base64Audio.length)
 
-    audioElementRef.current = new Audio(url)
-    audioElementRef.current.onended = () => {
-      setIsPlaying(false)
-      URL.revokeObjectURL(url)
+    try {
+      // Decode base64
+      const binaryString = atob(base64Audio)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      console.log('[Replay] Decoded bytes:', bytes.length)
+
+      // Try HTML5 Audio first with mp3
+      const blob = new Blob([bytes], { type: 'audio/mpeg' })
+      const url = URL.createObjectURL(blob)
+
+      audioElementRef.current = new Audio(url)
+
+      audioElementRef.current.onloadedmetadata = () => {
+        console.log('[Replay] Audio duration:', audioElementRef.current?.duration)
+      }
+
+      audioElementRef.current.onplay = () => {
+        console.log('[Replay] Playing!')
+        setIsPlaying(true)
+      }
+
+      audioElementRef.current.onended = () => {
+        console.log('[Replay] Ended')
+        setIsPlaying(false)
+        URL.revokeObjectURL(url)
+      }
+
+      audioElementRef.current.onerror = (e) => {
+        console.error('[Replay] Audio error:', audioElementRef.current?.error)
+        // Try as raw PCM if mp3 fails
+        tryRawPCM(bytes)
+      }
+
+      audioElementRef.current.play().catch(err => {
+        console.error('[Replay] Play error:', err)
+        tryRawPCM(bytes)
+      })
+    } catch (e) {
+      console.error('[Replay] Failed to decode base64:', e)
+      // Try raw PCM directly
+      tryRawPCM(null)
     }
 
-    audioElementRef.current.play()
-    setIsPlaying(true)
+    function tryRawPCM(decodedBytes: Uint8Array | null) {
+      console.log('[Replay] Trying raw PCM playback...')
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+        if (!AudioContextClass) {
+          console.error('[Replay] No AudioContext')
+          return
+        }
+
+        const ctx = new AudioContextClass()
+        const sampleRate = 32000
+        const numChannels = 1
+
+        let bytesToUse = decodedBytes
+        if (!bytesToUse) {
+          console.error('[Replay] No bytes available for PCM playback')
+          return
+        }
+
+        const bytesPerSample = 2
+        const numSamples = bytesToUse.length / bytesPerSample
+
+        console.log('[Replay] Creating AudioBuffer:', numSamples, 'samples')
+        const audioBuffer = ctx.createBuffer(numChannels, numSamples, sampleRate)
+        const channelData = audioBuffer.getChannelData(0)
+
+        const view = new DataView(bytesToUse.buffer, bytesToUse.byteOffset, bytesToUse.length)
+        for (let i = 0; i < numSamples; i++) {
+          const int16 = view.getInt16(i * 2, true)
+          channelData[i] = int16 / 32768.0
+        }
+
+        const source = ctx.createBufferSource()
+        source.buffer = audioBuffer
+        source.connect(ctx.destination)
+        source.start(0)
+        setIsPlaying(true)
+
+        source.onended = () => {
+          console.log('[Replay] PCM playback ended')
+          setIsPlaying(false)
+          ctx.close()
+        }
+        console.log('[Replay] PCM playback started!')
+      } catch (e) {
+        console.error('[Replay] PCM playback failed:', e)
+        setIsPlaying(false)
+      }
+    }
   }, [])
 
   const stopPlaying = useCallback(() => {

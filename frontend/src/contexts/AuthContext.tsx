@@ -1,16 +1,12 @@
 /**
  * AuthContext - Authentication state management
+ *
+ * 真实调用 /api/v1/auth/{login,register,me}，JWT 存 localStorage，
+ * axios 拦截器自动加 Authorization header。
  */
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-
-interface User {
-  id: string
-  email: string
-  username: string
-  full_name?: string
-  avatar_url?: string
-  role: string
-}
+import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react'
+import axios from 'axios'
+import authApi, { User } from '../api/auth'
 
 interface AuthState {
   user: User | null
@@ -21,13 +17,30 @@ interface AuthState {
 interface AuthContextType extends AuthState {
   login: (email: string, password: string) => Promise<void>
   register: (email: string, username: string, password: string, fullName?: string) => Promise<void>
-  logout: () => void
+  logout: () => Promise<void>
   updateUser: (updates: Partial<User>) => void
+  refreshUser: () => Promise<void>
+  getAccessToken: () => string | null
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
 const AUTH_STORAGE_KEY = 'sales_agent_auth'
+
+/**
+ * 安装 axios 拦截器：每次请求自动带 Authorization header。
+ * 这样所有 /api/v1/* 的受保护接口都能识别当前用户。
+ */
+function installAxiosAuthInterceptor(getToken: () => string | null) {
+  axios.interceptors.request.use((config) => {
+    const token = getToken()
+    if (token) {
+      config.headers = config.headers || {}
+      ;(config.headers as any).Authorization = `Bearer ${token}`
+    }
+    return config
+  })
+}
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [authState, setAuthState] = useState<AuthState>({
@@ -36,107 +49,126 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     isLoading: true
   })
 
-  // Load auth state from storage on mount
+  // 读取持久化的认证信息
+  const readStored = (): { user: User; token: string } | null => {
+    try {
+      const raw = localStorage.getItem(AUTH_STORAGE_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (parsed?.token && parsed?.user) return parsed
+    } catch {
+      // ignore
+    }
+    return null
+  }
+
+  const writeStored = (user: User, token: string) => {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user, token }))
+  }
+
+  const clearStored = () => {
+    localStorage.removeItem(AUTH_STORAGE_KEY)
+  }
+
+  const getAccessToken = (): string | null => {
+    const stored = readStored()
+    return stored?.token || null
+  }
+
+  // 初始化：装 axios 拦截器，从 localStorage 恢复登录态，
+  // 如果有 token 就异步调 /auth/me 验证有效性
   useEffect(() => {
-    const stored = localStorage.getItem(AUTH_STORAGE_KEY)
-    if (stored) {
-      try {
-        const { user, token } = JSON.parse(stored)
-        // In production, validate token with backend
-        if (token && user) {
-          setAuthState({
-            user,
-            isAuthenticated: true,
-            isLoading: false
-          })
-        }
-      } catch {
-        localStorage.removeItem(AUTH_STORAGE_KEY)
+    installAxiosAuthInterceptor(getAccessToken)
+
+    const stored = readStored()
+    if (!stored) {
+      setAuthState({ user: null, isAuthenticated: false, isLoading: false })
+      return
+    }
+
+    // 先乐观恢复，等 /auth/me 验证
+    setAuthState({ user: stored.user, isAuthenticated: true, isLoading: true })
+
+    authApi
+      .me()
+      .then((user) => {
+        setAuthState({ user, isAuthenticated: true, isLoading: false })
+        writeStored(user, getAccessToken() || '')
+      })
+      .catch(() => {
+        // /me 失败 → token 无效，清除登录态
+        clearStored()
         setAuthState({ user: null, isAuthenticated: false, isLoading: false })
-      }
-    } else {
+      })
+  }, [])
+
+  const login = async (email: string, password: string) => {
+    const res = await authApi.login({ email, password })
+    writeStored(res.user, res.access_token)
+    setAuthState({ user: res.user, isAuthenticated: true, isLoading: false })
+  }
+
+  const register = async (
+    email: string,
+    username: string,
+    password: string,
+    fullName?: string
+  ) => {
+    const res = await authApi.register({
+      email,
+      username,
+      password,
+      full_name: fullName,
+    })
+    writeStored(res.user, res.access_token)
+    setAuthState({ user: res.user, isAuthenticated: true, isLoading: false })
+  }
+
+  const logout = async () => {
+    try {
+      await authApi.logout()
+    } catch {
+      // 即便后端失败也要清本地
+    }
+    clearStored()
+    setAuthState({ user: null, isAuthenticated: false, isLoading: false })
+  }
+
+  const updateUser = (updates: Partial<User>) => {
+    setAuthState((prev) => {
+      if (!prev.user) return prev
+      const updated = { ...prev.user, ...updates }
+      const token = getAccessToken() || ''
+      writeStored(updated, token)
+      return { ...prev, user: updated }
+    })
+  }
+
+  const refreshUser = useCallback(async () => {
+    try {
+      const user = await authApi.me()
+      setAuthState((prev) => ({ ...prev, user, isAuthenticated: true, isLoading: false }))
+      const token = getAccessToken() || ''
+      writeStored(user, token)
+    } catch (err) {
+      // token 失效
+      clearStored()
       setAuthState({ user: null, isAuthenticated: false, isLoading: false })
     }
   }, [])
 
-  const login = async (email: string, password: string) => {
-    // In production, call API
-    // const response = await api.post('/auth/login', { email, password })
-    // Simulate login for demo
-    await new Promise(resolve => setTimeout(resolve, 800))
-
-    const demoUser: User = {
-      id: 'user-1',
-      email,
-      username: email.split('@')[0],
-      full_name: '演示用户',
-      role: 'user'
-    }
-
-    const demoToken = 'demo-token-' + Date.now()
-
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-      user: demoUser,
-      token: demoToken
-    }))
-
-    setAuthState({
-      user: demoUser,
-      isAuthenticated: true,
-      isLoading: false
-    })
-  }
-
-  const register = async (email: string, username: string, password: string, fullName?: string) => {
-    // In production, call API
-    // const response = await api.post('/auth/register', { email, username, password, full_name: fullName })
-    await new Promise(resolve => setTimeout(resolve, 800))
-
-    const newUser: User = {
-      id: 'user-' + Date.now(),
-      email,
-      username,
-      full_name: fullName,
-      role: 'user'
-    }
-
-    const token = 'demo-token-' + Date.now()
-
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-      user: newUser,
-      token
-    }))
-
-    setAuthState({
-      user: newUser,
-      isAuthenticated: true,
-      isLoading: false
-    })
-  }
-
-  const logout = () => {
-    localStorage.removeItem(AUTH_STORAGE_KEY)
-    setAuthState({
-      user: null,
-      isAuthenticated: false,
-      isLoading: false
-    })
-  }
-
-  const updateUser = (updates: Partial<User>) => {
-    setAuthState(prev => {
-      if (!prev.user) return prev
-      const updatedUser = { ...prev.user, ...updates }
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
-        user: updatedUser,
-        token: JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || '{}').token
-      }))
-      return { ...prev, user: updatedUser }
-    })
-  }
-
   return (
-    <AuthContext.Provider value={{ ...authState, login, register, logout, updateUser }}>
+    <AuthContext.Provider
+      value={{
+        ...authState,
+        login,
+        register,
+        logout,
+        updateUser,
+        refreshUser,
+        getAccessToken,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   )

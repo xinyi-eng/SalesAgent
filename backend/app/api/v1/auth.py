@@ -20,39 +20,17 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    get_user_id_from_token
+    get_user_id_from_token,
+    get_current_user as auth_get_current_user,
 )
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
 
-async def get_current_user(
-    token: str = None,
-    db: Session = Depends(get_db)
-) -> User:
-    """Get current authenticated user from token"""
-    # In production, get token from Authorization header
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="未提供认证令牌"
-        )
-
-    user_id = get_user_id_from_token(token)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证令牌"
-        )
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户不存在或已被禁用"
-        )
-
-    return user
+# 修复：原 get_current_user 接受 token: str = None（从 query 拿，从不取 Authorization header）
+# 现改用 core/security.py 里基于 OAuth2PasswordBearer 的实现，
+# 自动从 "Authorization: Bearer <token>" 取 token。
+get_current_user = auth_get_current_user
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -94,7 +72,8 @@ async def register(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
-        expires_in=60 * 60 * 24
+        expires_in=60 * 60 * 24,
+        user=user
     )
 
 
@@ -143,7 +122,8 @@ async def login(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
-        expires_in=60 * 60 * 24
+        expires_in=60 * 60 * 24,
+        user=user
     )
 
 
@@ -177,7 +157,8 @@ async def refresh_token(
         access_token=access_token,
         refresh_token=new_refresh_token,
         token_type="bearer",
-        expires_in=60 * 60 * 24
+        expires_in=60 * 60 * 24,
+        user=user
     )
 
 

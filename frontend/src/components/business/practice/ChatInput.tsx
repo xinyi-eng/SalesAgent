@@ -29,12 +29,9 @@ const ChatInput = ({
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const {
-    isRecording: recorderIsRecording,
-    isPlaying,
     isVoiceDetected,
     startRecording,
     stopRecording,
-    playAudio,
     audioLevel
   } = useAudioRecorder()
 
@@ -65,8 +62,13 @@ const ChatInput = ({
   const handleStartRecording = async () => {
     if (isDisabled) return
     try {
+      // OR-1: If AI is playing, stop playback first (interrupt) and send stop_playback
+      if (isPlayingAudio) {
+        onStopPlayback?.()
+      }
       await startRecording()
       setIsRecording(true)
+      // OR-1: Send voice_start to notify server that user is speaking
       onVoiceStart?.()
     } catch (error) {
       console.error('Failed to start recording:', error)
@@ -77,18 +79,17 @@ const ChatInput = ({
   const handleStopRecording = async () => {
     if (!isRecording) return
     try {
-      const base64Audio = await stopRecording()
+      const { audio: base64Audio, durationMs } = await stopRecording()
       setIsRecording(false)
       onVoiceEnd?.()
-      onSendMessage('[语音消息]', base64Audio)
+      // Show duration in placeholder text so the user always sees the
+      // voice message was captured, even when backend ASR fails.
+      const seconds = Math.max(1, Math.round(durationMs / 1000))
+      onSendMessage(`语音消息（${seconds}秒）`, base64Audio)
     } catch (error) {
       console.error('Failed to stop recording:', error)
       setIsRecording(false)
     }
-  }
-
-  const handlePlayAudio = (audioData: string) => {
-    playAudio(audioData)
   }
 
   const canSend = message.trim() && !isDisabled && !isSending
@@ -155,7 +156,7 @@ const ChatInput = ({
           )}
 
           {/* Action buttons */}
-          <div className="absolute right-2 bottom-2 flex items-center gap-1">
+          <div className="absolute right-2 bottom-2 flex items-center gap-2">
             {/* Voice record button */}
             <button
               onMouseDown={handleStartRecording}
@@ -163,18 +164,18 @@ const ChatInput = ({
               onMouseLeave={() => isRecording && handleStopRecording()}
               disabled={isDisabled || isSending}
               className={`
-                w-8 h-8 rounded-lg flex items-center justify-center
-                transition-all duration-200
+                w-12 h-12 rounded-xl flex items-center justify-center
+                transition-all duration-200 text-lg
                 ${isRecording
-                  ? 'bg-red-500 text-white animate-pulse'
+                  ? 'bg-red-500 text-white animate-pulse shadow-lg ring-2 ring-red-300'
                   : isDisabled
                     ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    : 'bg-blue-50 text-blue-600 hover:bg-blue-100 shadow'
                 }
               `}
               title="按住说话"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
               </svg>
             </button>
@@ -184,15 +185,15 @@ const ChatInput = ({
               onClick={handleSend}
               disabled={!canSend}
               className={`
-                w-8 h-8 rounded-lg flex items-center justify-center
-                transition-all duration-200
+                w-12 h-12 rounded-xl flex items-center justify-center
+                transition-all duration-200 text-lg
                 ${canSend
-                  ? 'bg-primary text-white hover:bg-primary/90'
+                  ? 'bg-primary text-white hover:bg-primary/90 shadow-lg'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                 }
               `}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
               </svg>
             </button>
