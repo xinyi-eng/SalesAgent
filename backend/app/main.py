@@ -460,81 +460,37 @@ async def process_user_message(websocket, session_id: str, content: str,
 
     try:
         from app.services.conversation.handler import get_conversation_handler
+        from app.services.conversation.streaming import stream_pipeline
         handler = get_conversation_handler()
-        result = await handler.handle_message(
-            user_message=user_text,
-            conversation_history=conversation_history,
-            customer_type=customer_type,
-            scenario=scenario,
+
+        # === 流式 pipeline（Day 1 改进）===
+        # LLM stream + 句子级 TTS 推送，目标首响 1.5-2s
+        async def ws_send_json(d):
+            await safe_send_message(session_id, d)
+
+        result = await stream_pipeline(
+            websocket_send=ws_send_json,
+            session_id=session_id,
+            user_text=user_text,
+            user_audio_data=audio_data,
+            user_audio_mime=audio_mime,
+            client_id=client_id,
+            minimax=minimax,
+            handler=handler,
             persona=persona,
             user_context=user_context,
         )
-        full_response = result.get("response", "")
-        print(f"[LLM-RAW] {full_response!r}")
-        # Strip <think>...</think> reasoning blocks (M-series wraps output)
-        clean_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL).strip()
-        # The M2.7 reasoning model often dumps its chain-of-thought OUTSIDE
-        # <think> tags. Try to extract just the in-character reply: the
-        # longest quoted "line" or the first paragraph that doesn't look
-        # like meta-commentary.
-        if clean_response and ('\n' in clean_response or '我应该' in clean_response or '特点：' in clean_response or '语音转文字' in clean_response):
-            # Heuristic: keep only the first non-empty paragraph that doesn't
-            # start with reasoning markers.
-            lines = [l for l in clean_response.split('\n') if l.strip()]
-            filtered = []
-            skip_markers = ('语音转文字', '李明辉的', '我应该', '特点：', '我的任务', '作为', '你需要', '客户：')
-            for line in lines:
-                if any(line.strip().startswith(m) for m in skip_markers):
-                    continue
-                filtered.append(line.strip())
-            if filtered:
-                clean_response = filtered[0]
-                print(f"[LLM-CLEANED] {clean_response!r}")
 
-        if clean_response:
-            session_manager.add_message(session_id, "ai", clean_response)
-            save_message_to_db(session_id, "ai", clean_response)
-            # Stash the references in a side-channel on the connection
-            # manager (NOT in the LLM context — the LLM API rejects
-            # "knowledge_refs" as a role name, so the request 400s).
-            refs = result.get("knowledge_refs", [])
-            if refs:
-                if not hasattr(manager, '_knowledge_refs'):
-                    manager._knowledge_refs = {}
-                manager._knowledge_refs.setdefault(session_id, []).extend(refs)
-
-            # Generate TTS audio so the user can replay this message later.
-            audio_b64 = ""
-            try:
-                audio_bytes = await minimax.text_to_speech(
-                    text=clean_response,
-                    model="speech-2.8-hd",
-                    voice="male-qn-qingse",
-                    speed=1.0,
-                    format="mp3",
-                    emotion=result.get("emotion", "neutral"),
-                    voice_modify=result.get("voice_modify", {})
-                )
-                audio_b64 = base64.b64encode(audio_bytes).decode()
-            except Exception as tts_err:
-                print(f"[TTS] Failed to generate audio for AI message: {tts_err}")
-
-            ai_msg_id = f"msg-{session_id}-ai-{int(datetime.utcnow().timestamp() * 1000)}"
-            await safe_send_message(session_id, {
-                "type": "ai_message",
-                "id": ai_msg_id,
-                "content": clean_response,
-                "audio_data": audio_b64,
-                "knowledge_refs": result.get("knowledge_refs", []),
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            await _maybe_transition_phase(session_id)
-        else:
-            await safe_send_message(session_id, {
-                "type": "ai_message",
-                "content": "抱歉，我现在无法回答。请稍后再试。",
-                "audio_data": ""
-            })
+        full_response = result.get("full_response", "")
+        refs = result.get("knowledge_refs", [])
+        if refs:
+            if not hasattr(manager, '_knowledge_refs'):
+                manager._knowledge_refs = {}
+            manager._knowledge_refs.setdefault(session_id, []).extend(refs)
+        if full_response:
+            session_manager.add_message(session_id, "ai", full_response)
+            save_message_to_db(session_id, "ai", full_response)
+        await _maybe_transition_phase(session_id)
     except Exception as e:
         print(f"[LLM] error: {e}")
         import traceback
