@@ -105,10 +105,13 @@ class SentenceBuffer:
     """
     累积 LLM 流式 token，按句子边界切分并产出。
     解决：英文省略号、数字小数点、连续标点等"假边界"问题。
+    实时剥掉 <think>...</think> 块（M2.7 reasoning model）。
     """
 
     def __init__(self):
         self._buf = ""
+        self._in_think = False  # 是否在 <think> 块内
+        self._think_buf = ""    # 累积 think 内容用于检测结束
 
     def push(self, token: str) -> List[str]:
         """
@@ -117,7 +120,11 @@ class SentenceBuffer:
         """
         if not token:
             return []
-        self._buf += token
+        # 流式剥 think 块：检测 <think> 和 </think>
+        clean = self._strip_think(token)
+        if not clean:
+            return []
+        self._buf += clean
         sentences = split_sentences(self._buf)
         if sentences:
             # 把已完成句子切走，保留尾巴
@@ -128,6 +135,31 @@ class SentenceBuffer:
                     cut_pos = idx + len(s)
             self._buf = self._buf[cut_pos:]
         return sentences
+
+    def _strip_think(self, token: str) -> str:
+        """实时剥 <think>...</think> 块，处理跨 token 的边界"""
+        out = ""
+        i = 0
+        while i < len(token):
+            if self._in_think:
+                # 找 </think>
+                end_idx = token.find("</think>", i)
+                if end_idx >= 0:
+                    self._in_think = False
+                    i = end_idx + len("</think>")
+                else:
+                    break  # 还在 think 块里，整个 token 都丢掉
+            else:
+                # 找 <think>
+                start_idx = token.find("<think>", i)
+                if start_idx >= 0:
+                    out += token[i:start_idx]
+                    self._in_think = True
+                    i = start_idx + len("<think>")
+                else:
+                    out += token[i:]
+                    break
+        return out
 
     def flush(self) -> str:
         """
@@ -140,6 +172,8 @@ class SentenceBuffer:
 
     def reset(self):
         self._buf = ""
+        self._in_think = False
+        self._think_buf = ""
 
 
 async def sentence_to_audio(
@@ -229,16 +263,9 @@ async def parallel_context_assembly(
         return detect_emotion(user_text, customer_type, history)
 
     async def rag():
-        try:
-            refs = handler._retrieve_knowledge_references(
-                user_message=user_text,
-                conversation_history=history,
-                scenario=scenario,
-            )
-            return refs or []
-        except Exception as e:
-            print(f"[RAG] failed: {e}")
-            return []
+        # 临时禁用 RAG（embedding 模型每次重新加载很慢），先打通流式
+        # TODO: 后续用 cache 解决
+        return []
 
     msgs, emotion_data, knowledge_refs = await asyncio.gather(
         build_msgs(), detect_emot(), rag()
@@ -263,6 +290,7 @@ async def parallel_context_assembly(
 
 async def stream_pipeline(
     websocket_send,
+    websocket_send_binary,
     session_id: str,
     user_text: str,
     user_audio_data: Optional[str],
@@ -308,6 +336,7 @@ async def stream_pipeline(
 
     t0 = time.time()
     # 1. 并行装配 context
+    print(f"[STREAM] assembling context for {user_text[:30]}...")
     assembled = await parallel_context_assembly(
         session_id, user_text, session_info, handler
     )
@@ -316,7 +345,7 @@ async def stream_pipeline(
     voice_modify = assembled["voice_modify"]
     breath_tag = assembled["breath_tag"]
     knowledge_refs = assembled["knowledge_refs"]
-    print(f"[STREAM] context assembly took {(time.time()-t0)*1000:.0f}ms")
+    print(f"[STREAM] context assembly took {(time.time()-t0)*1000:.0f}ms, msgs={len(messages)}, refs={len(knowledge_refs)}")
 
     # 2. 发 ai_streaming_start
     msg_id = f"msg-{session_id}-ai-{int(time.time()*1000)}"
@@ -335,15 +364,55 @@ async def stream_pipeline(
     tts_tasks: List[Awaitable] = []
     t0 = time.time()
     try:
-        async for token in minimax.chat_stream(messages):
+        token_count = 0
+        # 关键优化：边收 LLM token 边推送 TTS 完成的 audio chunk
+        # 用 asyncio.wait 监控"任何 TTS 任务完成就立刻推"，不等 gather
+        async def monitor_tts():
+            """在 LLM 还在生成时，实时把已完成的 TTS 推给前端"""
+            while True:
+                if not tts_tasks:
+                    await asyncio.sleep(0.05)
+                    continue
+                # 等任何一个 TTS 任务完成（不阻塞 LLM 流）
+                done, pending = await asyncio.wait(
+                    tts_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.1
+                )
+                for d in done:
+                    tts_tasks.remove(d)
+                    try:
+                        r = d.result()
+                        if r and isinstance(r, (bytes, bytearray)) and len(r) > 0:
+                            audio_chunks_emitted.append(bytes(r))
+                            if websocket_send_binary:
+                                try:
+                                    await websocket_send_binary(bytes(r))
+                                    print(f"[STREAM] pushed audio chunk ({len(r)} bytes) at {(time.time()-t0)*1000:.0f}ms")
+                                except Exception as e:
+                                    print(f"[STREAM] send_binary error: {e}")
+                    except Exception as e:
+                        print(f"[STREAM] TTS task error: {e}")
+                if not tts_tasks and not llm_streaming:
+                    break
+
+        # 起 monitor（和 LLM 流并行）
+        monitor_task = asyncio.create_task(monitor_tts())
+
+        # 用快模型（非推理），避免 <think> 块拖慢首字
+        llm_streaming = True
+        async for token in minimax.chat_stream(messages, model="MiniMax-Text-01"):
+            token_count += 1
+            if token_count <= 3:
+                print(f"[STREAM] first tokens: {token[:30]!r}")
             # 后处理 token
             full_text += token
             # 切句
             for s in buf.push(token):
                 # 把 breath_tag 插入第一句开头
                 if not sentences_emitted and breath_tag:
-                    s = breath_tag + " " + s
+                    tag = " ".join(breath_tag) if isinstance(breath_tag, list) else str(breath_tag)
+                    s = f"{tag} {s}"
                 sentences_emitted.append(s)
+                print(f"[STREAM] sentence #{len(sentences_emitted)}: {s[:50]}...")
                 # 并发送 TTS（不等它返回）
                 tts_tasks.append(asyncio.create_task(
                     sentence_to_audio(s, minimax, emotion, voice_modify)
@@ -355,27 +424,28 @@ async def stream_pipeline(
                     "content": "".join(sentences_emitted),
                     "timestamp": time.time(),
                 })
+        llm_streaming = False
+        print(f"[STREAM] LLM done, total {token_count} tokens")
         # 4. 收尾：把残留 buffer 拼出来
         tail = buf.flush()
         if tail:
             tail = clean_reasoning_dump(tail)
             if tail and not looks_like_reasoning_dump(tail):
                 if not sentences_emitted and breath_tag:
-                    tail = breath_tag + " " + tail
+                    tag = " ".join(breath_tag) if isinstance(breath_tag, list) else str(breath_tag)
+                    tail = f"{tag} {tail}"
                 sentences_emitted.append(tail)
                 tts_tasks.append(asyncio.create_task(
                     sentence_to_audio(tail, minimax, emotion, voice_modify)
                 ))
-        # 等所有 TTS 任务完成
-        tts_results = await asyncio.gather(*tts_tasks, return_exceptions=True)
-        for r in tts_results:
-            if isinstance(r, Exception):
-                print(f"[STREAM] TTS error: {r}")
-                continue
-            if r and isinstance(r, (bytes, bytearray)) and len(r) > 0:
-                audio_chunks_emitted.append(bytes(r))
-                # 推 audio_chunk 二进制
-                await websocket_send_binary(bytes(r))
+        # 等 monitor 把所有剩余 TTS 推完
+        if tts_tasks:
+            await asyncio.gather(*tts_tasks, return_exceptions=True)
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
     except Exception as e:
         print(f"[STREAM] LLM error: {e}")
         import traceback

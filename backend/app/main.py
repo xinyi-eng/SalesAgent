@@ -462,14 +462,22 @@ async def process_user_message(websocket, session_id: str, content: str,
         from app.services.conversation.handler import get_conversation_handler
         from app.services.conversation.streaming import stream_pipeline
         handler = get_conversation_handler()
+        print(f"[STREAM] starting pipeline for {session_id}, text_len={len(user_text)}")
 
         # === 流式 pipeline（Day 1 改进）===
         # LLM stream + 句子级 TTS 推送，目标首响 1.5-2s
         async def ws_send_json(d):
             await safe_send_message(session_id, d)
 
+        async def ws_send_binary(b: bytes):
+            try:
+                await manager.send_audio_chunk(session_id, b)
+            except Exception as e:
+                print(f"[STREAM] send_audio_chunk error: {e}")
+
         result = await stream_pipeline(
             websocket_send=ws_send_json,
+            websocket_send_binary=ws_send_binary,
             session_id=session_id,
             user_text=user_text,
             user_audio_data=audio_data,

@@ -752,7 +752,7 @@ class MiniMaxService:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "MiniMax-M2.7",  # Fixed model name
+                    "model": model,
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
@@ -801,7 +801,7 @@ class MiniMaxService:
         url = f"{self.base_url}/chat/completions"
 
         payload = {
-            "model": "MiniMax-M2.7",
+            "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
