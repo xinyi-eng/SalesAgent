@@ -101,6 +101,50 @@ def clean_reasoning_dump(text: str) -> str:
     return text
 
 
+def _build_simple_system_prompt(persona, scenario: str, user_context) -> str:
+    """
+    给 MiniMax-Text-01 用的极简 system prompt。
+    故意短、目标明确、避免触发长 reasoning。
+    """
+    # 提取 persona 关键信息
+    name = ""
+    title = ""
+    company = ""
+    industry = ""
+    background = ""
+    if persona:
+        name = persona.get("name", "")
+        title = persona.get("title", "")
+        company = persona.get("company", "")
+        industry = persona.get("industry", "")
+        bg = persona.get("background", "")
+        if bg:
+            background = bg[:150]
+
+    # 销售员背景
+    sales_info = ""
+    if user_context:
+        sc_name = user_context.get("name", "")
+        sc_product = user_context.get("product", "")
+        if sc_name: sales_info += f"销售员 {sc_name} "
+        if sc_product: sales_info += f"卖{sc_product}"
+
+    return f"""你扮演客户，{name or '某客户'}，{title}@{company}，{industry}行业。
+{('背景：' + background) if background else ''}
+
+场景：{scenario or '销售拜访'}
+
+{sales_info + '正找你谈。' if sales_info else '有销售来找你谈。'}
+
+回复要求（必须遵守）：
+- 直接回答，不要任何思考或解释
+- 短句，1-3 句，像真人说话
+- 口语化，可以用 (breath) (sighs) 等 TTS 标签
+- 绝不扮演销售、绝不提产品优势
+- 绝不输出"<think>"等内部思考标记
+"""
+
+
 class SentenceBuffer:
     """
     累积 LLM 流式 token，按句子边界切分并产出。
@@ -251,7 +295,7 @@ async def parallel_context_assembly(
         if msg.get("role") == "ai":
             msg["role"] = "assistant"
 
-    # 并行装配
+    # 并行装配 — 完整保留所有功能
     async def build_msgs():
         return handler._build_messages(
             user_text, history, customer_type, scenario,
@@ -263,9 +307,17 @@ async def parallel_context_assembly(
         return detect_emotion(user_text, customer_type, history)
 
     async def rag():
-        # 临时禁用 RAG（embedding 模型每次重新加载很慢），先打通流式
-        # TODO: 后续用 cache 解决
-        return []
+        """RAG 检索知识库（保留功能）"""
+        try:
+            refs = handler._retrieve_knowledge_references(
+                user_message=user_text,
+                conversation_history=history,
+                scenario=scenario,
+            )
+            return refs or []
+        except Exception as e:
+            print(f"[RAG] failed (non-fatal): {e}")
+            return []
 
     msgs, emotion_data, knowledge_refs = await asyncio.gather(
         build_msgs(), detect_emot(), rag()
@@ -397,9 +449,9 @@ async def stream_pipeline(
         # 起 monitor（和 LLM 流并行）
         monitor_task = asyncio.create_task(monitor_tts())
 
-        # 用快模型（非推理），避免 <think> 块拖慢首字
+        # 用 M2.7-highspeed（保持全部功能：persona/user_context/history/RAG/emotion 全在）
         llm_streaming = True
-        async for token in minimax.chat_stream(messages, model="MiniMax-Text-01"):
+        async for token in minimax.chat_stream(messages, model="MiniMax-M2.7-highspeed"):
             token_count += 1
             if token_count <= 3:
                 print(f"[STREAM] first tokens: {token[:30]!r}")
