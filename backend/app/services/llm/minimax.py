@@ -658,7 +658,7 @@ class MiniMaxService:
     async def chat(
         self,
         messages: list,
-        model: str = "MiniMax-M2.7-highspeed",
+        model: str = "MiniMax-M3",
         temperature: float = 0.7,
         max_tokens: int = 4096,
         stream: bool = False,
@@ -670,7 +670,7 @@ class MiniMaxService:
 
         Args:
             messages: List of message dicts [{"role": "user/assistant", "content": "..."}]
-            model: LLM model (default MiniMax-M2.7-highspeed)
+            model: LLM model (default MiniMax-M3 with thinking disabled)
             temperature: Temperature (0-1)
             max_tokens: Max response tokens
             stream: Enable streaming
@@ -695,12 +695,15 @@ class MiniMaxService:
             "max_tokens": max_tokens,
         }
         if reasoning_split:
-            # 实测：reasoning_split 单独用最优。
-            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
-            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
-            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
-            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
+            # 官方文档查证（https://platform.minimaxi.com/docs/api-reference/text-anthropic-api）：
+            # - M3 默认 thinking 关闭，可通过 `thinking: {"type": "adaptive"}` 开启
+            # - M2.x thinking 不可关闭（即使传 disabled 也无效，仍 6-10s）
+            # - reasoning_split 把 <think> 块搬到独立字段，content 干净
+            # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
+            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
+            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
+            payload["thinking"] = {"type": "disabled"}
 
         if tools:
             payload["tools"] = tools
@@ -734,7 +737,7 @@ class MiniMaxService:
     async def chat_stream(
         self,
         messages: list,
-        model: str = "MiniMax-M2.7-highspeed",
+        model: str = "MiniMax-M3",
         temperature: float = 0.7,
         max_tokens: int = 4096,
         reasoning_split: bool = True,
@@ -744,7 +747,7 @@ class MiniMaxService:
 
         Args:
             messages: List of message dicts
-            model: LLM model (default MiniMax-M2.7-highspeed)
+            model: LLM model (default MiniMax-M3 with thinking disabled)
             temperature: Temperature
             max_tokens: Max tokens
             reasoning_split: Default True — sends `reasoning_split=True` so the
@@ -768,12 +771,15 @@ class MiniMaxService:
             "stream": True,
         }
         if reasoning_split:
-            # 实测：reasoning_split 单独用最优。
-            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
-            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
-            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
-            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
+            # 官方文档查证（https://platform.minimaxi.com/docs/api-reference/text-anthropic-api）：
+            # - M3 默认 thinking 关闭，可通过 `thinking: {"type": "adaptive"}` 开启
+            # - M2.x thinking 不可关闭（即使传 disabled 也无效，仍 6-10s）
+            # - reasoning_split 把 <think> 块搬到独立字段，content 干净
+            # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
+            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
+            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
+            payload["thinking"] = {"type": "disabled"}
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
@@ -807,7 +813,7 @@ class MiniMaxService:
         self,
         messages: list,
         tools: list = None,
-        model: str = "MiniMax-M2.7-highspeed",
+        model: str = "MiniMax-M3",
         temperature: float = 0.7,
         max_tokens: int = 4096,
         reasoning_split: bool = True,
@@ -818,7 +824,7 @@ class MiniMaxService:
         Args:
             messages: List of message dicts
             tools: List of tool definitions
-            model: LLM model (default MiniMax-M2.7-highspeed)
+            model: LLM model (default MiniMax-M3 with thinking disabled)
             temperature: Temperature
             max_tokens: Max tokens
             reasoning_split: Default True — keeps `content` free of <think> blocks.
@@ -839,12 +845,15 @@ class MiniMaxService:
             "stream": True,
         }
         if reasoning_split:
-            # 实测：reasoning_split 单独用最优。
-            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
-            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
-            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
-            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
+            # 官方文档查证（https://platform.minimaxi.com/docs/api-reference/text-anthropic-api）：
+            # - M3 默认 thinking 关闭，可通过 `thinking: {"type": "adaptive"}` 开启
+            # - M2.x thinking 不可关闭（即使传 disabled 也无效，仍 6-10s）
+            # - reasoning_split 把 <think> 块搬到独立字段，content 干净
+            # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
+            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
+            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
+            payload["thinking"] = {"type": "disabled"}
 
         if tools:
             payload["tools"] = tools

@@ -492,12 +492,9 @@ async def stream_pipeline(
 
         # 用 M2.7-highspeed（保持全部功能：persona/user_context/history/RAG/emotion 全在）
         llm_streaming = True
-        print(f"[STREAM][T={int((time.time()-t0)*1000):>5}ms] → calling chat_stream (model=M2.7-highspeed, reasoning_split=True)")
-        # 实测结论：MiniMax M2.7-highspeed 一次 yield 整个句子（不是真 1 token / chunk）。
-        # 流式切句（每 token 切）反而切出 2-4 个短句，TTS 并发触发限流，每句 12-15s。
-        # 改成：等 LLM stream 结束再统一切 + 1 句完整 TTS。Turbo 5.2s 即可。
-        # 用户感知：先推 streaming_update 看到 AI 在想（T=8s 时就显示），再 TTS 5s 后听到。
-        async for token in minimax.chat_stream(messages, model="MiniMax-M2.7-highspeed"):
+        print(f"[STREAM][T={int((time.time()-t0)*1000):>5}ms] → calling chat_stream (model=M3 + thinking disabled, TTFT 2.6s 实测)")
+        # 改用 M3 + thinking disabled — 实测 TTFT 2.6s（之前 M2.7-highspeed 6-10s）
+        async for token in minimax.chat_stream(messages, model="MiniMax-M3"):
             now_ms = int((time.time() - t0) * 1000)
             token_count += 1
             if first_token_at is None:
