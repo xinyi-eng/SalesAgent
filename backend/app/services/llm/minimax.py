@@ -695,6 +695,11 @@ class MiniMaxService:
             "max_tokens": max_tokens,
         }
         if reasoning_split:
+            # 实测：reasoning_split 单独用最优。
+            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
+            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
+            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
+            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
             payload["reasoning_split"] = True
 
         if tools:
@@ -763,6 +768,11 @@ class MiniMaxService:
             "stream": True,
         }
         if reasoning_split:
+            # 实测：reasoning_split 单独用最优。
+            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
+            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
+            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
+            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
             payload["reasoning_split"] = True
 
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -829,6 +839,11 @@ class MiniMaxService:
             "stream": True,
         }
         if reasoning_split:
+            # 实测：reasoning_split 单独用最优。
+            # - 默认（无 reasoning_split）：6.7s，content 含 <think> 块
+            # - reasoning_split：6.7s，content 干净，reasoning 拆到独立字段 ← 最优
+            # - reasoning_split + effort=0：10.2s（反而变慢，effort=0 没意义反而拖长）
+            # - reasoning_effort=0 单独用：6.2s，content 仍含 <think> 块
             payload["reasoning_split"] = True
 
         if tools:

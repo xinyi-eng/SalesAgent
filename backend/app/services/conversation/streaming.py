@@ -187,12 +187,10 @@ class SentenceBuffer:
 
     def push(self, token: str) -> List[str]:
         """
-        追加新 token，返回本次新增的完整句子列表。
-        残留的部分（不完整句子）保留在内部 buffer。
+        追加新 token，**只累积不切句**（避免 LLM 一次 yield 整句时被切丢内容）。
+        返回空列表（兼容性保留）。
 
-        P1 优化：默认 allow_partial=True，让 split_sentences 在没主边界（句号问号）
-        时也能用次级边界（逗号/分号/空格）切短句，让 TTS 在 LLM 还在推后续 token 时
-        就能 fire，真正实现 TTS 与 LLM 并行。
+        当前架构：LLM stream 结束时由 caller 调 `flush()` 拿全部内容，统一 1 句 TTS。
         """
         if not token:
             return []
@@ -201,20 +199,8 @@ class SentenceBuffer:
         if not clean:
             return []
         self._buf += clean
-        # 实测 partial split 反而触发 MiniMax TTS 并发限流：
-        # 1 句完整 TTS 用 turbo 5.2s，但 3-4 个并发 TTS 每个 12-14s。
-        # 当前 LLM 一口气 yield 整个句子，partial 切短句没收益。
-        # 等将来 LLM 真正流式推 token（1 token / chunk）时再开。
-        sentences = split_sentences(self._buf, allow_partial=False)
-        if sentences:
-            # 把已完成句子切走，保留尾巴
-            cut_pos = 0
-            for s in sentences:
-                idx = self._buf.find(s, cut_pos)
-                if idx >= 0:
-                    cut_pos = idx + len(s)
-            self._buf = self._buf[cut_pos:]
-        return sentences
+        # 不切句 — LLM 完时统一处理
+        return []
 
     def _strip_think(self, token: str) -> str:
         """实时剥 <think>...</think> 块，处理跨 token 的边界"""
@@ -527,6 +513,9 @@ async def stream_pipeline(
         # 4. LLM 结束：flush buf 拿到完整内容（不切句，1 句完整 TTS）
         tail = buf.flush()
         full_sentence = tail.strip() if tail else ""
+        # 去掉 MiniMax 输出里多余的 \n（多个连续换行）— 不影响语义但 TTS 不会读
+        import re as _re
+        full_sentence = _re.sub(r'\n+', '，', full_sentence).strip() if full_sentence else ""
         if full_sentence:
             full_sentence = clean_reasoning_dump(full_sentence)
         if full_sentence and not looks_like_reasoning_dump(full_sentence):
