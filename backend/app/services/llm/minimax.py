@@ -701,9 +701,10 @@ class MiniMaxService:
             # - reasoning_split 把 <think> 块搬到独立字段，content 干净
             # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
-            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
-            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
-            payload["thinking"] = {"type": "disabled"}
+            # 实测 M3 默认 thinking 就是关闭的（TTFT 2.3s）。
+            # M2.x 即使传 thinking: {type: disabled} 也关不掉（仍 7-11s），
+            # 因为文档明说 "M2.x thinking 无法关闭"。
+            # 默认 model 已是 MiniMax-M3，所以不需要传 thinking 参数。
 
         if tools:
             payload["tools"] = tools
@@ -777,9 +778,10 @@ class MiniMaxService:
             # - reasoning_split 把 <think> 块搬到独立字段，content 干净
             # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
-            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
-            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
-            payload["thinking"] = {"type": "disabled"}
+            # 实测 M3 默认 thinking 就是关闭的（TTFT 2.3s）。
+            # M2.x 即使传 thinking: {type: disabled} 也关不掉（仍 7-11s），
+            # 因为文档明说 "M2.x thinking 无法关闭"。
+            # 默认 model 已是 MiniMax-M3，所以不需要传 thinking 参数。
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
@@ -851,9 +853,10 @@ class MiniMaxService:
             # - reasoning_split 把 <think> 块搬到独立字段，content 干净
             # 实测：M3 + thinking disabled + reasoning_split = TTFT 2.6s，content 干净
             payload["reasoning_split"] = True
-            # M3 走 anthropic 兼容协议时，thinking 控制用 `thinking: {"type": "disabled"}`
-            # M2.x 传这个参数会忽略，但不影响（顶层有 reasoning_split）
-            payload["thinking"] = {"type": "disabled"}
+            # 实测 M3 默认 thinking 就是关闭的（TTFT 2.3s）。
+            # M2.x 即使传 thinking: {type: disabled} 也关不掉（仍 7-11s），
+            # 因为文档明说 "M2.x thinking 无法关闭"。
+            # 默认 model 已是 MiniMax-M3，所以不需要传 thinking 参数。
 
         if tools:
             payload["tools"] = tools
