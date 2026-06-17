@@ -500,6 +500,120 @@ class MiniMaxService:
             print(f"[ASR-Realtime] WS error: {e}")
             return ""
 
+    async def speech_to_text_realtime_stream(
+        self,
+        pcm_chunks_source,  # async iterator yielding 24kHz mono PCM bytes
+        on_partial,  # async callable(str) - 推 partial transcript
+        session_instruction: str = None,
+    ) -> str:
+        """P5 真正的流式 ASR：边收 audio chunk 边推 Realtime，边收 partial transcript 边回调。
+
+        Args:
+            pcm_chunks_source: async iterator yielding raw PCM bytes (24kHz mono s16le)
+            on_partial: async callable，每个 partial transcript 推一次
+            session_instruction: 传给 Realtime 的 system prompt
+
+        Returns:
+            final transcript 字符串
+        """
+        import asyncio
+        import ssl
+        import websockets
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        url = "wss://api.minimaxi.com/ws/v1/realtime"
+        instruction = session_instruction or (
+            "你是一个语音转写机器。请把听到的中文原样输出。"
+            "只输出你听到的文字，不加问候语，不加任何解释，不加标点修改。"
+        )
+
+        try:
+            async with websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                ssl=ssl_ctx,
+                max_size=10 * 1024 * 1024,
+            ) as ws:
+                await asyncio.wait_for(ws.recv(), timeout=10)  # session.created
+
+                await ws.send(json.dumps({
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["text"],
+                        "input_audio_format": "pcm16",
+                        "input_audio_transcription": {"model": "asr-01"},
+                        "instructions": instruction,
+                        # 关键：开启 server_vad 让服务端自动检测语音停顿 + 增量输出
+                        "turn_detection": {"type": "server_vad"},
+                    },
+                }))
+                await asyncio.wait_for(ws.recv(), timeout=10)  # session.updated
+
+                # 后台任务：持续喂 audio 给 Realtime
+                async def _feeder():
+                    try:
+                        async for pcm in pcm_chunks_source:
+                            await ws.send(json.dumps({
+                                "type": "input_audio_buffer.append",
+                                "audio": base64.b64encode(pcm).decode(),
+                            }))
+                    except Exception as e:
+                        print(f"[ASR-Stream] feeder stopped: {e}")
+
+                feeder_task = asyncio.create_task(_feeder())
+
+                # 收事件循环
+                final_text = ""
+                latest_delta = ""
+                try:
+                    while True:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                        data = json.loads(msg)
+                        etype = data.get("type", "")
+                        if etype == "response.text.delta":
+                            latest_delta += data.get("delta", "")
+                            # 推 partial 给调用方
+                            try:
+                                await on_partial(latest_delta)
+                            except Exception as cb_err:
+                                print(f"[ASR-Stream] on_partial error: {cb_err}")
+                        elif etype == "response.text.done":
+                            final_text = data.get("text", "")
+                        elif etype == "response.done":
+                            # 提取最完整的 final text
+                            for o in data.get("response", {}).get("output", []):
+                                for c in o.get("content", []):
+                                    if c.get("type") == "text":
+                                        final_text = c.get("text", final_text)
+                            break  # 完成
+                        elif etype == "input_audio_buffer.speech_started":
+                            # 用户开始说话（VAD 检测到语音）— 可以更新 UI 状态
+                            pass
+                        elif etype == "input_audio_buffer.speech_stopped":
+                            # VAD 检测到语音停顿 — 推 final partial
+                            pass
+                        elif etype == "error":
+                            print(f"[ASR-Stream] error: {data.get('error')}")
+                            break
+                except asyncio.TimeoutError:
+                    print("[ASR-Stream] recv timeout, finalizing")
+                finally:
+                    feeder_task.cancel()
+                    try:
+                        await feeder_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                # 清理
+                return final_text.strip() if final_text else ""
+
+        except Exception as e:
+            print(f"[ASR-Stream] error: {e}")
+            return ""
+
     # ==================== Local ASR (faster-whisper fallback) ====================
 
     async def speech_to_text_local(
