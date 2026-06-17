@@ -37,6 +37,8 @@ interface ChatContainerProps {
   onSendMessage: (message: string, audioData?: string) => void
   onVoiceStart?: () => void
   onVoiceEnd?: () => void
+  /** 流式 ASR：录音时把每个分片推给后端 */
+  onAudioChunk?: (chunk: Uint8Array) => void
   onStopPlayback?: () => void
   onPlayAudio?: (audioData: string) => void
   isDisabled?: boolean
@@ -51,6 +53,7 @@ const ChatContainer = ({
   onSendMessage,
   onVoiceStart,
   onVoiceEnd,
+  onAudioChunk,
   onStopPlayback,
   onPlayAudio,
   isDisabled = false,
@@ -179,6 +182,7 @@ const ChatContainer = ({
         onSendMessage={onSendMessage}
         onVoiceStart={onVoiceStart}
         onVoiceEnd={onVoiceEnd}
+        onAudioChunk={onAudioChunk}
         onStopPlayback={onStopPlayback}
         isDisabled={isDisabled}
         isSending={isSending}

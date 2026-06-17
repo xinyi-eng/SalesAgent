@@ -9,6 +9,8 @@ interface ChatInputProps {
   onSendMessage: (message: string, audioData?: string) => void
   onVoiceStart?: () => void
   onVoiceEnd?: () => void
+  /** 流式 ASR：录音时把每个分片推给后端做实时识别 */
+  onAudioChunk?: (chunk: Uint8Array) => void
   onStopPlayback?: () => void
   isDisabled?: boolean
   isSending?: boolean
@@ -19,6 +21,7 @@ const ChatInput = ({
   onSendMessage,
   onVoiceStart,
   onVoiceEnd,
+  onAudioChunk,
   onStopPlayback,
   isDisabled = false,
   isSending = false,
@@ -66,7 +69,8 @@ const ChatInput = ({
       if (isPlayingAudio) {
         onStopPlayback?.()
       }
-      await startRecording()
+      // 流式 ASR：startRecording 的 onChunk 回调会立刻把每个 200ms 分片推给后端
+      await startRecording({ onChunk: onAudioChunk })
       setIsRecording(true)
       // OR-1: Send voice_start to notify server that user is speaking
       onVoiceStart?.()

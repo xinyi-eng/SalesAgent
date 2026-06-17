@@ -102,7 +102,9 @@ async def _daily_brief_push():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时：跑一次（让新装的服务能立即看到今天的数据）
-    asyncio.create_task(_daily_brief_push())
+    # ⚠️ 临时禁用：industry_brief 会跑 10+ 次 chat completion 调用、持锁 30-60s，
+    # 阻塞所有 /api 请求。生产部署时再打开。
+    # asyncio.create_task(_daily_brief_push())
     # 8:30 (Asia/Shanghai) 每天定时 — 早间简报推送
     scheduler.add_job(
         _daily_brief_push,
@@ -113,6 +115,17 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     logger.info("[scheduler] APScheduler started: daily_brief_push @ 08:30 Asia/Shanghai")
+    # 预热 BGE 嵌入模型：第一次 RAG 检索会触发 60s+ 懒加载，挪到启动时。
+    # 同步跑（不需要等），放后台 task 即可。
+    async def _warmup_embedding():
+        try:
+            from app.services.knowledge.embedding import get_embedding_model
+            embedder = get_embedding_model()
+            embedder.embed_query("warmup")
+            logger.info("[warmup] BGE embedding model ready")
+        except Exception as e:
+            logger.warning(f"[warmup] BGE warmup failed (will lazy-load on first request): {e}")
+    asyncio.create_task(_warmup_embedding())
     # 打印已注册 job 列表便于排错
     for job in scheduler.get_jobs():
         logger.info(f"[scheduler] job: id={job.id} next_run={job.next_run_time}")
@@ -823,17 +836,67 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
 
     # ------------------------------------------------------------------
     # Receive loop (single, well-defined)
+    # 支持 text (JSON) + binary (audio chunks) 帧
     # ------------------------------------------------------------------
+    # P2: 流式 ASR — 边录边推 audio chunk，voice_end 时一次性送 MiniMax Realtime
+    # ASR，省掉整段录音后再 ASR 的 3-5s 延迟。
+    stream_buffer: List[bytes] = []
+    stream_mime: str = "audio/webm"
+    stream_client_id: Optional[str] = None
+    stream_lock = asyncio.Lock()
+
+    async def _finalize_stream_asr_and_process():
+        """voice_end 触发：合并所有 binary chunks → ASR → 调 stream_pipeline。
+        ASR 用 MiniMax Realtime API（faster than 整段 REST）。"""
+        async with stream_lock:
+            audio_blob = b"".join(stream_buffer)
+            stream_buffer.clear()
+            mime = stream_mime
+            client_id = stream_client_id
+        if not audio_blob:
+            print("[ASR-Stream] voice_end with empty buffer, skip")
+            return
+        print(f"[ASR-Stream] finalizing {len(audio_blob)} bytes, mime={mime}")
+        # 调 process_user_message 复用现有 ASR + LLM 流式 pipeline
+        # 用整段 audio data，但 ffmpeg + realtime API 通常 1-2s 完成
+        await process_user_message(
+            websocket, session_id,
+            "",  # content 空，ASR 完会填
+            base64.b64encode(audio_blob).decode(),
+            mime,
+            client_id,
+        )
+
     try:
         while True:
             try:
-                data = await websocket.receive_json()
-                msg_type = data.get("type")
+                # 用 receive() 区分 text / binary 帧
+                raw = await websocket.receive()
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                print(f"[WS] Error receiving JSON: {e}")
+                print(f"[WS] Error receiving frame: {e}")
                 break
+
+            if raw.get("type") != "websocket.receive":
+                # websocket.disconnected 等其他事件
+                continue
+
+            # 处理 binary 帧（流式 ASR 音频分片）
+            if "bytes" in raw and raw["bytes"]:
+                async with stream_lock:
+                    stream_buffer.append(bytes(raw["bytes"]))
+                continue
+
+            # 处理 text 帧（JSON 命令）
+            text = raw.get("text")
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            msg_type = data.get("type")
 
             if msg_type == "user_message":
                 asyncio.create_task(process_user_message(
@@ -847,9 +910,15 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
                 await safe_send_status(session_id, ConversationState.IDLE)
                 await safe_send_message(session_id, {"type": "playback_stopped"})
             elif msg_type == "voice_start":
+                async with stream_lock:
+                    stream_buffer.clear()
+                    stream_mime = data.get("audio_mime", "audio/webm")
+                    stream_client_id = data.get("id")
                 await safe_send_status(session_id, ConversationState.USER_SPEAKING)
             elif msg_type == "voice_end":
                 await safe_send_status(session_id, ConversationState.IDLE)
+                # 流式 ASR 收尾 + 触发 LLM
+                asyncio.create_task(_finalize_stream_asr_and_process())
                 if session_manager.should_insert_backchannel(session_id):
                     backchannel_text = backchannel_manager.generate_backchannel_text()
                     await safe_send_message(session_id, {

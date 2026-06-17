@@ -271,7 +271,7 @@ const PracticeChatPage = () => {
     console.log('WebSocket disconnected')
   }, [])
 
-  const { isConnected, sendMessage: wsSendMessage, sendStopPlayback, sendVoiceStart } = useWebSocket({
+  const { isConnected, sendMessage: wsSendMessage, sendStopPlayback, sendVoiceStart, sendVoiceEnd, sendAudioChunk } = useWebSocket({
     url: wsUrl,
     onMessage: handleMessage,
     onAudioChunk: (chunk) => {
@@ -460,7 +460,8 @@ const PracticeChatPage = () => {
             }
             onSendMessage={handleSendMessage}
             onVoiceStart={sendVoiceStart}
-            onVoiceEnd={() => {}}  // Handled in ChatInput
+            onVoiceEnd={sendVoiceEnd}
+            onAudioChunk={sendAudioChunk}
             onStopPlayback={handleStopPlayback}
             onPlayAudio={audioStream.playStoredAudio}
             isDisabled={currentSession?.status === 'completed'}

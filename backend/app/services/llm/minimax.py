@@ -37,7 +37,7 @@ class MiniMaxService:
     async def text_to_speech(
         self,
         text: str,
-        model: str = "speech-2.8-hd",
+        model: str = "speech-2.8-turbo",
         voice: str = "male-qn-qingse",
         speed: float = 1.0,
         volume: float = 1.0,
@@ -658,22 +658,27 @@ class MiniMaxService:
     async def chat(
         self,
         messages: list,
-        model: str = "M2.7",
+        model: str = "MiniMax-M2.7-highspeed",
         temperature: float = 0.7,
         max_tokens: int = 4096,
         stream: bool = False,
-        tools: Optional[list] = None
+        tools: Optional[list] = None,
+        reasoning_split: bool = True,
     ) -> str:
         """
-        Chat with LLM (M2.7).
+        Chat with LLM (M2.7 highspeed by default).
 
         Args:
             messages: List of message dicts [{"role": "user/assistant", "content": "..."}]
-            model: LLM model (M2.7/M2.5)
+            model: LLM model (default MiniMax-M2.7-highspeed)
             temperature: Temperature (0-1)
             max_tokens: Max response tokens
             stream: Enable streaming
             tools: List of tool definitions for function calling
+            reasoning_split: If True, send `reasoning_split=True` so the server
+                returns the model's <think>...</think> block in a separate
+                `reasoning_content` field instead of polluting `content`. This
+                keeps the streaming pipeline's user-visible text clean.
 
         Returns:
             LLM response text, or JSON with tool_calls if function calling triggered
@@ -684,11 +689,13 @@ class MiniMaxService:
         url = f"{self.base_url}/chat/completions"
 
         payload = {
-            "model": "MiniMax-M2.7",
+            "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
         }
+        if reasoning_split:
+            payload["reasoning_split"] = True
 
         if tools:
             payload["tools"] = tools
@@ -722,26 +729,41 @@ class MiniMaxService:
     async def chat_stream(
         self,
         messages: list,
-        model: str = "MiniMax-M2.7",
+        model: str = "MiniMax-M2.7-highspeed",
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        reasoning_split: bool = True,
     ) -> AsyncIterator[str]:
         """
         Stream chat with LLM.
 
         Args:
             messages: List of message dicts
-            model: LLM model
+            model: LLM model (default MiniMax-M2.7-highspeed)
             temperature: Temperature
             max_tokens: Max tokens
+            reasoning_split: Default True — sends `reasoning_split=True` so the
+                server's <think>...</think> block is moved to a separate
+                `reasoning_content` field, keeping `content` clean for the
+                streaming pipeline.
 
         Yields:
-            Response chunks
+            Response chunks (only `content` — reasoning_content is filtered out)
         """
         if not self.api_key:
             raise ValueError("MINIMAX_API_KEY not set")
 
         url = f"{self.base_url}/chat/completions"
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if reasoning_split:
+            payload["reasoning_split"] = True
 
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
@@ -751,13 +773,7 @@ class MiniMaxService:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True
-                }
+                json=payload
             ) as response:
                 async for line in response.aiter_lines():
                     if line.startswith("data:"):
@@ -768,6 +784,9 @@ class MiniMaxService:
                                 choices = data.get("choices", [])
                                 if choices:
                                     delta = choices[0].get("delta", {})
+                                    # Only yield `content`. Skip `reasoning_content`
+                                    # so the streaming pipeline never sees the
+                                    # <think>...</think> chain-of-thought block.
                                     content = delta.get("content", "")
                                     if content:
                                         yield content
@@ -778,9 +797,10 @@ class MiniMaxService:
         self,
         messages: list,
         tools: list = None,
-        model: str = "MiniMax-M2.7",
+        model: str = "MiniMax-M2.7-highspeed",
         temperature: float = 0.7,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        reasoning_split: bool = True,
     ) -> AsyncIterator:
         """
         Stream chat with tool/function calling support.
@@ -788,9 +808,10 @@ class MiniMaxService:
         Args:
             messages: List of message dicts
             tools: List of tool definitions
-            model: LLM model
+            model: LLM model (default MiniMax-M2.7-highspeed)
             temperature: Temperature
             max_tokens: Max tokens
+            reasoning_split: Default True — keeps `content` free of <think> blocks.
 
         Yields:
             Either string tokens (for regular content) or dicts with tool_calls
@@ -805,8 +826,10 @@ class MiniMaxService:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": True
+            "stream": True,
         }
+        if reasoning_split:
+            payload["reasoning_split"] = True
 
         if tools:
             payload["tools"] = tools

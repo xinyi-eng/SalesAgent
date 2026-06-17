@@ -10,7 +10,7 @@ interface UseAudioRecorderReturn {
   isPlaying: boolean
   isVoiceDetected: boolean
   audioLevel: number
-  startRecording: () => Promise<void>
+  startRecording: (opts?: { onChunk?: (chunk: Uint8Array) => void }) => Promise<void>
   stopRecording: () => Promise<RecordedAudio>
   playAudio: (base64Audio: string) => void
   stopPlaying: () => void
@@ -53,8 +53,9 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     }
   }, [isRecording])
 
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (opts?: { onChunk?: (chunk: Uint8Array) => void }) => {
     const startTime = Date.now()
+    const onChunk = opts?.onChunk
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -83,13 +84,23 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       })
       audioChunksRef.current = []
 
-      mediaRecorderRef.current.ondataavailable = (event) => {
+      mediaRecorderRef.current.ondataavailable = async (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data)
+          // 流式推送：把每个分片立刻转成 Uint8Array 通过 onChunk 回调
+          // （由调用方负责通过 WebSocket 二进制帧推到后端，让后端做实时 ASR）
+          if (onChunk) {
+            try {
+              const buf = await event.data.arrayBuffer()
+              onChunk(new Uint8Array(buf))
+            } catch (e) {
+              console.error('[Recorder] failed to push chunk:', e)
+            }
+          }
         }
       }
 
-      mediaRecorderRef.current.start(100)
+      mediaRecorderRef.current.start(200)  // 200ms 一片 → 平衡延迟与开销
       setIsRecording(true)
       updateAudioLevel()
 
