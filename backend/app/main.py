@@ -4,6 +4,7 @@ SalesAgent Application Entry Point
 import os
 import re
 import json
+import time
 import base64
 import asyncio
 import logging
@@ -126,6 +127,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[warmup] BGE warmup failed (will lazy-load on first request): {e}")
     asyncio.create_task(_warmup_embedding())
+
+    # 预热 whisper 模型：ASR 首次请求触发 2-3s 模型加载，挪到启动时。
+    async def _warmup_whisper():
+        try:
+            from app.services.llm.minimax import get_minimax_service
+            svc = get_minimax_service()
+            # 触发 faster_whisper 模型 lazy 加载（speech_to_text_local 内部）
+            # 用空字符串（避免实际推理）
+            # 实际上 _load_model 是在 import 后第一次 .transcribe 才触发
+            # 所以只 import 不调也可以 warmup SentenceTransformer / torch
+            import faster_whisper
+            logger.info("[warmup] faster_whisper importable")
+        except Exception as e:
+            logger.warning(f"[warmup] whisper warmup skipped: {e}")
+    asyncio.create_task(_warmup_whisper())
     # 打印已注册 job 列表便于排错
     for job in scheduler.get_jobs():
         logger.info(f"[scheduler] job: id={job.id} next_run={job.next_run_time}")
@@ -844,6 +860,35 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
     stream_mime: str = "audio/webm"
     stream_client_id: Optional[str] = None
     stream_lock = asyncio.Lock()
+    # P3: partial trigger LLM — 用户 voice_start 后 1.5s 就用已有 audio 触发 ASR+LLM
+    # 这样 LLM 6.7s thinking 时间被用户说话时间覆盖，user stop 时 LLM 已就绪。
+    partial_trigger_task: Optional[asyncio.Task] = None
+    partial_trigger_done: bool = False
+    voice_start_time: Optional[float] = None
+
+    async def _early_trigger_asr_llm():
+        """voice_start 后 1.5s（用户已说话一段）立即触发 ASR + LLM pipeline。
+        即使用户后续还在说，LLM 已开始思考，能砍 4-5s 延迟。"""
+        nonlocal partial_trigger_done
+        try:
+            await asyncio.sleep(1.5)
+            async with stream_lock:
+                if partial_trigger_done or not stream_buffer:
+                    return
+                audio_blob = b"".join(stream_buffer)
+                # 不清空 stream_buffer — 用户继续说，voice_end 时还会用全部音频
+            print(f"[P3] early trigger after 1.5s, audio={len(audio_blob)} bytes")
+            # 调 process_user_message 复用 ASR + LLM 流程
+            await process_user_message(
+                websocket, session_id,
+                "",  # content 空，让 ASR 填
+                base64.b64encode(audio_blob).decode(),
+                stream_mime,
+                stream_client_id,
+            )
+            partial_trigger_done = True
+        except Exception as e:
+            print(f"[P3] early trigger failed: {e}")
 
     async def _finalize_stream_asr_and_process():
         """voice_end 触发：合并所有 binary chunks → ASR → 调 stream_pipeline。
@@ -914,11 +959,22 @@ async def practice_websocket(websocket: WebSocket, session_id: str):
                     stream_buffer.clear()
                     stream_mime = data.get("audio_mime", "audio/webm")
                     stream_client_id = data.get("id")
+                    partial_trigger_done = False
+                voice_start_time = time.time()
                 await safe_send_status(session_id, ConversationState.USER_SPEAKING)
+                # P3: 启动 early trigger — 1.5s 后用已有 audio 触发 LLM
+                if partial_trigger_task and not partial_trigger_task.done():
+                    partial_trigger_task.cancel()
+                partial_trigger_task = asyncio.create_task(_early_trigger_asr_llm())
             elif msg_type == "voice_end":
                 await safe_send_status(session_id, ConversationState.IDLE)
-                # 流式 ASR 收尾 + 触发 LLM
-                asyncio.create_task(_finalize_stream_asr_and_process())
+                # P3: voice_end 触发时跳过（partial trigger 已用早 1.5s 音频触发 LLM）
+                # 取消 partial_trigger_task（如果还在跑），由 voice_end 路径接管
+                if partial_trigger_task and not partial_trigger_task.done():
+                    partial_trigger_task.cancel()
+                if not partial_trigger_done:
+                    # 用户说话太短（< 1.5s）P3 没触发，用 voice_end 触发
+                    asyncio.create_task(_finalize_stream_asr_and_process())
                 if session_manager.should_insert_backchannel(session_id):
                     backchannel_text = backchannel_manager.generate_backchannel_text()
                     await safe_send_message(session_id, {

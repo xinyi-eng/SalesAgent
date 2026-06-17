@@ -1,7 +1,8 @@
 /**
  * useAudioStream - Streaming audio playback hook
- * Handles chunked audio playback with interruption support
- * Uses HTML5 Audio element for reliable MP3 playback
+ * Handles chunked audio playback with interruption support.
+ * P4: 用 Web Audio API 实时解码 + 排队播放（替代累积 blob 后再播），
+ * 第一个 mp3 chunk 到达后 ~0.3s 即可开始播放。
  */
 import { useState, useRef, useCallback } from 'react'
 
@@ -33,6 +34,59 @@ export function useAudioStream(): UseAudioStreamReturn {
   const isPlayingRef = useRef(false)
   const isInterruptedRef = useRef(false)
   const currentUrlRef = useRef<string | null>(null)
+
+  // P4: Web Audio API 实时流式播放
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  // mp3 累积器（mp3 头在第一个 chunk，frame 在后续 chunks）
+  const mp3AccumRef = useRef<Uint8Array[]>([])
+  // 解码后待播的 AudioBuffer 队列
+  const pendingBuffersRef = useRef<AudioBuffer[]>([])
+  // 下一次播放的开始时间（用 AudioContext.currentTime + offset）
+  const nextStartTimeRef = useRef<number>(0)
+  // 已播完的总秒数（用于 currentPosition）
+  const totalPlayedSecRef = useRef<number>(0)
+  // 排队播放用的 Interval ID
+  const drainIntervalRef = useRef<number | null>(null)
+
+  const ensureAudioContext = useCallback((): AudioContext | null => {
+    if (typeof window === 'undefined') return null
+    const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext
+    if (!Ctx) return null
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new Ctx()
+    }
+    // 用户交互后 audioCtx 可能被挂起，需要 resume
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {})
+    }
+    return audioCtxRef.current
+  }, [])
+
+  const drainQueue = useCallback(() => {
+    const ctx = audioCtxRef.current
+    if (!ctx) return
+    while (pendingBuffersRef.current.length > 0) {
+      const buf = pendingBuffersRef.current.shift()!
+      const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current)
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(ctx.destination)
+      src.start(startAt)
+      nextStartTimeRef.current = startAt + buf.duration
+      // 最后一个 source 结束时设 isPlaying=false
+      src.onended = () => {
+        if (pendingBuffersRef.current.length === 0) {
+          // 给 50ms 缓冲看还有没有新 buffer 进来
+          setTimeout(() => {
+            if (pendingBuffersRef.current.length === 0) {
+              setIsPlaying(false)
+              isPlayingRef.current = false
+            }
+          }, 100)
+        }
+      }
+    }
+  }, [])
 
   const processQueue = useCallback(() => {
     console.log('[AudioStream] processQueue called, queue length:', chunkQueueRef.current.length)
@@ -119,14 +173,49 @@ export function useAudioStream(): UseAudioStreamReturn {
   }, [])
 
   const playChunk = useCallback((chunk: Uint8Array) => {
-    console.log('[AudioStream] playChunk called, queue size:', chunkQueueRef.current.length, 'chunk size:', chunk.length)
-    chunkQueueRef.current.push(chunk)
-
-    console.log('[AudioStream] isPlayingRef:', isPlayingRef.current)
-    if (!isPlayingRef.current) {
-      processQueue()
+    const ctx = ensureAudioContext()
+    if (!ctx) {
+      // Web Audio 不可用：降级用旧逻辑（累积到齐后用 HTML5 Audio 播）
+      chunkQueueRef.current.push(chunk)
+      if (!isPlayingRef.current) processQueue()
+      return
     }
-  }, [processQueue])
+    // P4: 把 chunk 累积到 mp3 缓冲，等解码出 AudioBuffer 后立即入队播放
+    mp3AccumRef.current.push(chunk)
+    // 合并所有累积的 mp3 字节，尝试 decodeAudioData
+    const totalLen = mp3AccumRef.current.reduce((s, c) => s + c.length, 0)
+    const combined = new Uint8Array(totalLen)
+    let off = 0
+    for (const c of mp3AccumRef.current) { combined.set(c, off); off += c.length }
+
+    // 累积到 8KB 以上再尝试解码（mp3 frame 通常 1-2KB，8KB 大概率有完整 frame）
+    if (combined.length < 8192 && pendingBuffersRef.current.length === 0) {
+      return
+    }
+    // 把 combined copy 出来（不要消耗 mp3AccumRef，否则下个 chunk 重复数据）
+    const toDecode = combined.slice()
+
+    // 异步 decode
+    ctx.decodeAudioData(toDecode.buffer.slice(toDecode.byteOffset, toDecode.byteOffset + toDecode.byteLength))
+      .then((audioBuf) => {
+        if (isInterruptedRef.current) return
+        pendingBuffersRef.current.push(audioBuf)
+        // 重置 mp3 累积器（已成功解码）
+        mp3AccumRef.current = []
+        if (!isPlayingRef.current) {
+          isPlayingRef.current = true
+          setIsPlaying(true)
+          if (nextStartTimeRef.current < ctx.currentTime) {
+            nextStartTimeRef.current = ctx.currentTime + 0.05  // 50ms 缓冲
+          }
+          drainQueue()
+        }
+      })
+      .catch((err) => {
+        // mp3 头不完整或解码失败 — 不重置 mp3AccumRef，等下一个 chunk
+        console.warn('[AudioStream] decodeAudioData failed (will retry with more chunks):', err.message)
+      })
+  }, [ensureAudioContext, drainQueue, processQueue])
 
   const playBase64Chunk = useCallback((base64: string) => {
     const binaryString = atob(base64)
@@ -251,6 +340,14 @@ export function useAudioStream(): UseAudioStreamReturn {
 
     isPlayingRef.current = false
     chunkQueueRef.current = []
+    // P4: 清理 Web Audio state
+    mp3AccumRef.current = []
+    pendingBuffersRef.current = []
+    nextStartTimeRef.current = 0
+    if (drainIntervalRef.current !== null) {
+      clearInterval(drainIntervalRef.current)
+      drainIntervalRef.current = null
+    }
 
     setIsPlaying(false)
     setCurrentPosition(0)

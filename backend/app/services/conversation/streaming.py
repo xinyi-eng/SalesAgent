@@ -242,32 +242,41 @@ class SentenceBuffer:
         self._think_buf = ""
 
 
-async def sentence_to_audio(
+async def sentence_to_audio_stream(
     sentence: str,
     minimax,
     emotion: str = "neutral",
     voice_modify: Optional[Dict] = None,
     voice: str = "male-qn-qingse",
+    on_chunk: Optional[Callable[[bytes], Awaitable]] = None,
 ) -> bytes:
     """
-    把一个句子转成 mp3 bytes。
-    短句（约 60-100 字）合成时间 400-700ms。
+    把一个句子转成 mp3 bytes（流式：边收边推 on_chunk）。
+    短句（约 60-100 字）合成时间 4-5s，第一个 chunk 2.9s 即可到达。
     """
     t_tts = time.time()
+    first_chunk_ms = None
     try:
-        out = await minimax.text_to_speech(
+        accumulated = bytearray()
+        async for chunk in minimax.text_to_speech_stream(
             text=sentence,
             model="speech-2.8-turbo",
             voice=voice,
-            speed=1.0,
-            format="mp3",
-            emotion=emotion if emotion else "neutral",
-            voice_modify=voice_modify or {},
-        )
-        print(f"[TTS][{int((time.time()-t_tts)*1000):>4}ms] {len(sentence)} chars → {len(out)} bytes")
-        return out
+        ):
+            if first_chunk_ms is None:
+                first_chunk_ms = int((time.time() - t_tts) * 1000)
+                print(f"[TTS][stream] first chunk at {first_chunk_ms}ms for {len(sentence)} chars")
+            accumulated.extend(chunk)
+            if on_chunk:
+                try:
+                    await on_chunk(bytes(chunk))
+                except Exception as e:
+                    print(f"[TTS] on_chunk error: {e}")
+        total_ms = int((time.time() - t_tts) * 1000)
+        print(f"[TTS][stream] done in {total_ms}ms, {len(accumulated)} bytes ({len(sentence)} chars)")
+        return bytes(accumulated)
     except Exception as e:
-        print(f"[TTS] sentence failed ({int((time.time()-t_tts)*1000)}ms): {e}")
+        print(f"[TTS] stream failed ({int((time.time()-t_tts)*1000)}ms): {e}")
         return b""
 
 
@@ -533,7 +542,10 @@ async def stream_pipeline(
                 "timestamp": time.time(),
             })
             tts_tasks.append(asyncio.create_task(
-                sentence_to_audio(full_sentence, minimax, emotion, voice_modify)
+                sentence_to_audio_stream(
+                    full_sentence, minimax, emotion, voice_modify,
+                    on_chunk=websocket_send_binary,
+                )
             ))
         else:
             print(f"[STREAM][T={int((time.time()-t0)*1000):>5}ms] final sentence empty or reasoning-dump, skip")
