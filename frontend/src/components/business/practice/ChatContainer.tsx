@@ -73,7 +73,7 @@ const ChatContainer = ({
     if (isNearBottom) {
       scrollToBottom()
     }
-  }, [messages])
+  }, [messages, isNearBottom])
 
   const handleScroll = () => {
     const container = containerRef.current

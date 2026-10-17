@@ -98,33 +98,6 @@ export function useVAD(options: VADOptions = DEFAULT_OPTIONS): UseVADReturn {
     animationRef.current = requestAnimationFrame(detectVoice)
   }, [smoothedEnergy, calculateEnergy])
 
-  const startVAD = useCallback((audioStream: MediaStream) => {
-    // Stop any existing VAD
-    stopVAD()
-
-    // Create audio context with echo cancellation and noise suppression
-    audioContextRef.current = new AudioContext({
-      // @ts-ignore - these are valid but not in all TS definitions
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
-    })
-
-    const source = audioContextRef.current.createMediaStreamSource(audioStream)
-    sourceRef.current = source
-
-    const analyser = audioContextRef.current.createAnalyser()
-    analyser.fftSize = 512
-    analyser.smoothingTimeConstant = 0.3
-    analyserRef.current = analyser
-
-    source.connect(analyser)
-    energyHistoryRef.current = []
-    silenceStartRef.current = null
-
-    detectVoice()
-  }, [detectVoice])
-
   const stopVAD = useCallback(() => {
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current)
@@ -148,6 +121,33 @@ export function useVAD(options: VADOptions = DEFAULT_OPTIONS): UseVADReturn {
       silenceDuration: 0
     })
   }, [])
+
+  const startVAD = useCallback((audioStream: MediaStream) => {
+    // Stop any existing VAD
+    stopVAD()
+
+    // Create audio context with echo cancellation and noise suppression
+    audioContextRef.current = new AudioContext({
+      // @ts-expect-error - browser-specific media processing options are not in every TypeScript DOM definition
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    })
+
+    const source = audioContextRef.current.createMediaStreamSource(audioStream)
+    sourceRef.current = source
+
+    const analyser = audioContextRef.current.createAnalyser()
+    analyser.fftSize = 512
+    analyser.smoothingTimeConstant = 0.3
+    analyserRef.current = analyser
+
+    source.connect(analyser)
+    energyHistoryRef.current = []
+    silenceStartRef.current = null
+
+    detectVoice()
+  }, [detectVoice, stopVAD])
 
   const setOptions = useCallback((newOptions: VADOptions) => {
     currentOptions.current = { ...currentOptions.current, ...newOptions }

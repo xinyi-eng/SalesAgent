@@ -14,6 +14,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ScoreChart from '../../components/business/practice/ScoreChart'
 import api from '../../api/practice'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 interface StageDetail {
   quote?: string
@@ -29,9 +30,9 @@ interface ReviewData {
   problem_score: number
   implication_score: number
   need_payoff_score: number
-  communication_score: number
-  persuasion_score: number
-  closing_score: number
+  communication_score: number | null
+  persuasion_score: number | null
+  closing_score: number | null
   spin_score: number
   // 4 维度详细评价（来自 LLM 真实输出）
   situation?: StageDetail
@@ -43,6 +44,9 @@ interface ReviewData {
   next_practice_focus: string
   created_at: string
 }
+
+type SummaryExtras = Partial<Pick<ReviewData, 'communication_score' | 'persuasion_score' | 'closing_score' | 'spin_score'>>
+type ReviewStageKey = 'situation' | 'problem' | 'implication' | 'need_payoff'
 
 interface PracticeReviewPageProps {
   sessionId?: string
@@ -72,6 +76,7 @@ const PracticeReviewPage = ({ sessionId: propSessionId }: PracticeReviewPageProp
 
       try {
         const summary = await api.getSessionSummary(sessionId)
+        const extraScores = summary as typeof summary & SummaryExtras
         setReviewData({
           session_id: summary.session_id,
           overall_score: summary.overall_score,
@@ -81,20 +86,20 @@ const PracticeReviewPage = ({ sessionId: propSessionId }: PracticeReviewPageProp
           need_payoff_score: summary.need_payoff_score,
           // 后端目前没通信/说服/促成子分；显示 null 让 UI 显示 "-"
           // 不要硬编码 75 占位
-          communication_score: (summary as any).communication_score ?? null,
-          persuasion_score: (summary as any).persuasion_score ?? null,
-          closing_score: (summary as any).closing_score ?? null,
-          spin_score: (summary as any).spin_score ?? summary.overall_score,
+          communication_score: extraScores.communication_score ?? null,
+          persuasion_score: extraScores.persuasion_score ?? null,
+          closing_score: extraScores.closing_score ?? null,
+          spin_score: extraScores.spin_score ?? summary.overall_score,
           // 后端缺字段时显示空数组（UI 已能渲染"暂无"）
           key_strengths: summary.key_strengths || [],
           areas_for_improvement: summary.areas_for_improvement || [],
           next_practice_focus: summary.next_practice_focus || '',
           created_at: new Date().toISOString()
         })
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('Failed to load session summary:', error)
         setLoadError(
-          error?.response?.data?.detail || error?.message || '加载复盘失败'
+          getErrorMessage(error, '加载复盘失败')
         )
         setReviewData(null)
       } finally {
@@ -109,9 +114,9 @@ const PracticeReviewPage = ({ sessionId: propSessionId }: PracticeReviewPageProp
     // 后端已有 /practice/sessions/{id}/report/pdf 真实接口
     try {
       await api.downloadReportPdf(sessionId)
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('PDF download failed:', error)
-      alert('PDF 导出失败：' + (error?.response?.data?.detail || error?.message || '未知错误'))
+      alert('PDF 导出失败：' + getErrorMessage(error, '未知错误'))
     }
   }
 
@@ -202,20 +207,25 @@ const PracticeReviewPage = ({ sessionId: propSessionId }: PracticeReviewPageProp
         {/* Score Card */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-6">能力评估</h2>
-          <ScoreChart scores={reviewData as any} />
+          <ScoreChart scores={{
+            communication_score: reviewData.communication_score,
+            persuasion_score: reviewData.persuasion_score,
+            closing_score: reviewData.closing_score,
+            spin_score: reviewData.spin_score,
+          }} />
         </div>
 
         {/* SPIN 4 维度详细评价（来自 LLM） */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">📋 SPIN 四维详细评价</h2>
           <div className="space-y-3">
-            {[
+            {([
               { key: 'situation', label: 'S-现状探询', desc: '询问客户当前背景' },
               { key: 'problem', label: 'P-难点发掘', desc: '挖出客户具体不满' },
               { key: 'implication', label: 'I-暗示后果', desc: '放大问题影响' },
               { key: 'need_payoff', label: 'N-价值呈现', desc: '让客户自己说价值' },
-            ].map((stage) => {
-              const detail = (reviewData as any)[stage.key] as StageDetail | undefined
+            ] as Array<{ key: ReviewStageKey; label: string; desc: string }>).map((stage) => {
+              const detail = reviewData[stage.key]
               if (!detail || (!detail.quote && !detail.analysis && !detail.reference && !detail.suggestion)) {
                 return null
               }

@@ -9,10 +9,12 @@ import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../../contexts/AuthContext'
 import axios from 'axios'
 
+interface NotificationItem { id: string; link?: string; is_read: boolean; title: string; body?: string; created_at: string }
+
 const NotificationBell = () => {
   const [unread, setUnread] = useState(0)
   const [open, setOpen] = useState(false)
-  const [items, setItems] = useState<any[]>([])
+  const [items, setItems] = useState<NotificationItem[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -23,7 +25,7 @@ const NotificationBell = () => {
           setUnread(r.data.unread_count || 0)
           setItems(r.data.items || [])
         }
-      } catch { /* silent */ }
+      } catch { /* notification polling is best-effort */ }
     }
     fetch_()
     const id = setInterval(fetch_, 60000)  // 每分钟拉一次
@@ -36,7 +38,7 @@ const NotificationBell = () => {
       await axios.post('/api/v1/notifications/read-all')
       setUnread(0)
       setItems((prev) => prev.map((i) => ({ ...i, is_read: true })))
-    } catch {}
+    } catch { /* keeping the unread state is safer than masking a failed request */ }
   }
 
   return (
@@ -74,7 +76,7 @@ const NotificationBell = () => {
                   key={n.id}
                   href={n.link || '#'}
                   onClick={async () => {
-                    try { await axios.post(`/api/v1/notifications/${n.id}/read`) } catch {}
+                    try { await axios.post(`/api/v1/notifications/${n.id}/read`) } catch { /* notification read state will retry later */ }
                     if (!n.is_read) setUnread((u) => Math.max(0, u - 1))
                   }}
                   className={`block px-4 py-3 hover:bg-gray-50 ${n.is_read ? '' : 'bg-blue-50/50'}`}

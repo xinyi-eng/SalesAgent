@@ -15,6 +15,7 @@ import profileApi, { UserStats as ApiUserStats } from '../../api/profile'
 import authApi from '../../api/auth'
 import practiceApi, { SessionListItem } from '../../api/practice'
 import ScoreChart from '../../components/business/practice/ScoreChart'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 interface UserStats extends ApiUserStats {}
 
@@ -60,9 +61,9 @@ const ProfilePage = () => {
       ])
       setStats(statsData)
       setRecentSessions(sessionsData.data || [])
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to load profile stats:', err)
-      setError(err?.response?.data?.detail || err?.message || '加载用户统计失败')
+      setError(getErrorMessage(err, '加载用户统计失败'))
       setStats(null)
     } finally {
       setIsLoading(false)
@@ -81,9 +82,9 @@ const ProfilePage = () => {
       // 触发 AuthContext 重新拉 /auth/me 刷新 user
       await refreshUser()
       setIsEditing(false)
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to save profile:', err)
-      setSaveError(err?.response?.data?.detail || err?.message || '保存失败')
+      setSaveError(getErrorMessage(err, '保存失败'))
     } finally {
       setIsSaving(false)
     }
@@ -139,6 +140,11 @@ const ProfilePage = () => {
 
       {/* Main Content */}
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+        {error && (
+          <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+            {error}
+          </div>
+        )}
         {/* Stats Overview */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
@@ -272,6 +278,9 @@ const ProfilePage = () => {
                 />
               </div>
             </div>
+            {saveError && (
+              <p className="mt-4 text-sm text-red-600">{saveError}</p>
+            )}
             <div className="flex justify-end gap-3 mt-6">
               <button
                 onClick={() => setIsEditing(false)}
@@ -281,9 +290,10 @@ const ProfilePage = () => {
               </button>
               <button
                 onClick={handleSaveProfile}
-                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90"
+                disabled={isSaving}
+                className="px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50"
               >
-                保存
+                {isSaving ? '保存中...' : '保存'}
               </button>
             </div>
           </div>

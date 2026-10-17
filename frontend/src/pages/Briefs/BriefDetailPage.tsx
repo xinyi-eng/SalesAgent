@@ -6,9 +6,10 @@
  * - 关键要点
  * - 导出 PDF
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import api, { BriefDetail, BriefItem } from '../../api/briefs'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 const BriefDetailPage = () => {
   const { id = '' } = useParams()
@@ -17,22 +18,22 @@ const BriefDetailPage = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    loadBrief()
-  }, [id])
-
-  const loadBrief = async () => {
+  const loadBrief = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     try {
       const data = await api.getBrief(id)
       setBrief(data)
-    } catch (e: any) {
-      setError(e?.message || '加载失败')
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, '加载失败'))
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [id])
+
+  useEffect(() => {
+    loadBrief()
+  }, [loadBrief])
 
   if (isLoading) {
     return (

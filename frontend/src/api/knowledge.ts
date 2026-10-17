@@ -25,7 +25,7 @@ export interface SearchResult {
   text: string
   source: string
   score: number
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
 }
 
 export interface SpinQuestions {

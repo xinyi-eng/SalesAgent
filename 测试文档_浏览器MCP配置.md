@@ -3,7 +3,7 @@
 ## 测试环境
 
 - **前端**: Vite React (localhost:5173)
-- **后端**: FastAPI (localhost:8001)
+- **后端**: FastAPI (localhost:8002)
 - **浏览器**: Chrome with --remote-debugging-port=9222
 - **系统**: Windows 11
 
@@ -75,7 +75,7 @@ curl http://127.0.0.1:9222/json/version
 **后端服务**：
 ```bash
 cd C:\Users\zsndz\Desktop\SalesAgent\backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8001
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8002
 ```
 
 **前端服务**：
@@ -169,7 +169,7 @@ npm run dev
 1. 添加 `from datetime import datetime` 导入
 2. 添加 WebSocket 连接确认消息 `{"type":"connected",...}`
 3. 修复异常处理避免无限循环
-4. 前端改用直接连接 `ws://localhost:8001/ws/practice/{session_id}`
+4. 前端改用直接连接 `ws://localhost:8002/ws/practice/{session_id}`
 
 **验证结果**：
 ```python
@@ -230,7 +230,7 @@ taskkill /F /IM chrome.exe 2>/dev/null; powershell -Command "Start-Process 'C:\P
 curl http://127.0.0.1:9222/json/version
 
 # 启动后端
-cd /c/Users/zsndz/Desktop/SalesAgent/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 &
+cd /c/Users/zsndz/Desktop/SalesAgent/backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8002 &
 
 # 启动前端
 cd /c/Users/zsndz/Desktop/SalesAgent/frontend && npm run dev &

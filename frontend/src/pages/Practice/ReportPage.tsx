@@ -51,6 +51,8 @@ interface ReportData {
   knowledge_refs?: KnowledgeRef[]
 }
 
+type ReportStageKey = 'situation' | 'problem' | 'implication' | 'need_payoff'
+
 export default function ReportPage() {
   const { session_id } = useParams()
   const navigate = useNavigate()
@@ -198,7 +200,7 @@ export default function ReportPage() {
         <div className="bg-white rounded-2xl shadow-sm p-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">📋 SPIN 四维详细评价</h3>
           <div className="space-y-4">
-            {[
+            {([
               { key: 'situation', label: 'S-现状探询', color: 'green',
                 desc: '询问客户当前背景、规模、痛点' },
               { key: 'problem', label: 'P-难点发掘', color: 'blue',
@@ -207,8 +209,8 @@ export default function ReportPage() {
                 desc: '放大问题的影响和代价' },
               { key: 'need_payoff', label: 'N-价值呈现', color: 'purple',
                 desc: '让客户自己说解决后的价值' },
-            ].map((stage) => {
-              const detail = (report as any)[stage.key] as StageDetail | undefined
+            ] as Array<{ key: ReportStageKey; label: string; color: string; desc: string }>).map((stage) => {
+              const detail = report[stage.key]
               if (!detail) return null
               return (
                 <details

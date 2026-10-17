@@ -13,7 +13,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { usePracticeStore } from '../../stores/practiceStore'
-import { useWebSocket, StreamMessage } from '../../hooks/useWebSocket'
+import { useWebSocket, StreamMessage, KnowledgeRef } from '../../hooks/useWebSocket'
 import { useAudioStream } from '../../hooks/useAudioStream'
 import ChatContainer from '../../components/business/practice/ChatContainer'
 import PhaseSummaryModal from '../../components/business/practice/PhaseSummaryModal'
@@ -27,14 +27,7 @@ interface MessageItem {
   audioData?: string  // base64 encoded audio for replay
   isSending?: boolean
   timestamp: string
-  knowledgeRefs?: Array<{
-    category?: string
-    source?: string
-    chapter?: string
-    section?: string
-    excerpt?: string
-    relevance?: number
-  }>
+  knowledgeRefs?: KnowledgeRef[]
 }
 
 interface PhaseSummaryData {
@@ -50,15 +43,12 @@ interface PhaseSummaryData {
   suggestions: string[]
 }
 
-const VALID_PHASES = ['opening', 'discovery', 'needs', 'proposal', 'closing'] as const
-
 const PracticeChatPage = () => {
   const navigate = useNavigate()
   const {
     currentSession,
     selectedScenario,
     selectedRoleConfig,
-    updateSessionPhase,
     updatePersona
   } = usePracticeStore()
 
@@ -72,22 +62,28 @@ const PracticeChatPage = () => {
   const currentAIMessageIdRef = useRef<string | null>(null)
 
   // Audio streaming for TTS playback
-  const audioStream = useAudioStream()
+  const {
+    isPlaying: isPlayingAudio,
+    playChunk,
+    playStoredAudio,
+    stop: stopAudio,
+  } = useAudioStream()
 
   // First message comes from WebSocket (ai_message with empty audio_data,
 // then ai_message_audio with the audio). No local fallback - backend
 // always sends it.
 
   // 销售员自填的练习档案（从 practiceStore 传过来，banner 展示用）
-  const userContext = (selectedRoleConfig as any)?.__userContext as
-    | {
-        sales_level?: string
-        years_experience?: number
-        practice_goals?: string[]
-        difficulty?: string
-        notes?: string
-      }
-    | undefined
+  const userContext = (selectedRoleConfig as (RoleConfig & {
+    __userContext?: {
+      sales_level?: string
+      years_experience?: number
+      practice_goals?: string[]
+      difficulty?: string
+      notes?: string
+    }
+  }) | null)?.__userContext
+  const practiceGoals = userContext?.practice_goals ?? []
 
   // Wait for session to be loaded from store before deciding to redirect.
   // On first render, currentSession may be null while zustand rehydrates,
@@ -104,7 +100,7 @@ const PracticeChatPage = () => {
   }, [hasCheckedSession, currentSession, navigate])
 
   // Build WebSocket URL - 走 vite 代理（同页同源，自动跟随 vite.config.ts 的 target）
-  // 这样切换后端端口只改一处；硬编码 ws://localhost:8001 之前会绕过 proxy
+  // 这样切换后端端口只改一处；硬编码后端地址会绕过 Vite proxy
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = currentSession?.id && currentSession.id.length > 10
     ? `${wsProtocol}//${window.location.host}/ws/practice/${currentSession.id}`
@@ -122,21 +118,18 @@ const PracticeChatPage = () => {
     if (wsMessage.type === 'user_message_ack') {
       const targetId = wsMessage.id
       const asrText = (wsMessage.data?.asr_text as string)
-        || (wsMessage as any).asr_text
+        || wsMessage.asr_text
         || ''
-      const asrOk = (wsMessage.data?.asr_ok as boolean)
-        ?? (wsMessage as any).asr_ok
-        ?? false
-      console.log('[ACK] msg keys:', Object.keys(wsMessage), 'id:', wsMessage.id, 'data:', wsMessage.data, 'asr_text:', (wsMessage as any).asr_text)
+      console.log('[ACK] msg keys:', Object.keys(wsMessage), 'id:', wsMessage.id, 'data:', wsMessage.data, 'asr_text:', wsMessage.asr_text)
       // Replace the bubble content whenever the backend gives us text.
-      // - If ASR succeeded (asrOk=true), the bubble gets the real transcript.
-      // - If ASR failed (asrOk=false), the backend sends a "没听清" notice
+      // - If ASR succeeds, the bubble gets the real transcript.
+      // - If ASR fails, the backend sends a "没听清" notice
       //   so the user knows their message wasn't understood (instead of
       //   staring at "语音消息（4秒）" forever).
       // Don't replace user-typed text — only replace placeholder content.
       // Placeholders: "语音消息（X秒）" / "[语音消息（X秒）]" /
       //               "[系统：没听清...]" / "[系统：语音识别出错...]"
-      const isPlaceholder = content =>
+      const isPlaceholder = (content: string) =>
         !content ||
         content.startsWith('[语音消息') ||
         content.startsWith('语音消息（') ||
@@ -180,7 +173,7 @@ const PracticeChatPage = () => {
       const content = wsMessage.content || wsMessage.data?.content as string || ''
       const audioData = wsMessage.audio_data || ''
       // Backend can attach a freshly-generated persona on the first ai_message
-      const persona = (wsMessage as any).persona
+      const persona = wsMessage.persona
       if (persona && persona.name) {
         updatePersona(persona)
       }
@@ -217,7 +210,7 @@ const PracticeChatPage = () => {
 
         // Play audio if available (only on first appearance, not on upsert)
         if (audioData && audioData.length > 0) {
-          audioStream.playStoredAudio(audioData)
+          playStoredAudio(audioData)
         }
       }
       return
@@ -232,7 +225,7 @@ const PracticeChatPage = () => {
           m.id === targetId ? { ...m, audioData } : m
         ))
         // Play it once
-        audioStream.playStoredAudio(audioData)
+        playStoredAudio(audioData)
       }
       return
     } else if (wsMessage.type === 'ai_streaming_update') {
@@ -261,7 +254,7 @@ const PracticeChatPage = () => {
     if (wsMessage.type === 'backchannel') {
       console.log('[Backchannel]', wsMessage.content)
     }
-  }, [updateSessionPhase, updatePersona])
+  }, [playStoredAudio, updatePersona])
 
   const handleConnected = useCallback(() => {
     console.log('WebSocket connected')
@@ -274,10 +267,7 @@ const PracticeChatPage = () => {
   const { isConnected, sendMessage: wsSendMessage, sendStopPlayback, sendVoiceStart, sendVoiceEnd, sendAudioChunk } = useWebSocket({
     url: wsUrl,
     onMessage: handleMessage,
-    onAudioChunk: (chunk) => {
-      // Play audio immediately when received
-      audioStream.playChunk(chunk)
-    },
+    onAudioChunk: playChunk,
     onConnected: handleConnected,
     onDisconnected: handleDisconnected
   })
@@ -308,9 +298,9 @@ const PracticeChatPage = () => {
 
   // OR-1: Handle stop playback (interrupt AI speech and notify server)
   const handleStopPlayback = useCallback(() => {
-    audioStream.stop()
+    stopAudio()
     sendStopPlayback()  // Notify server to stop TTS
-  }, [audioStream, sendStopPlayback])
+  }, [sendStopPlayback, stopAudio])
 
   // Get role configuration labels
   const getRoleLabel = (config: RoleConfig | null, key: keyof RoleConfig) => {
@@ -440,8 +430,8 @@ const PracticeChatPage = () => {
           {/* 销售员自填的练习档案徽章 */}
           {userContext && (
             <span className="text-gray-500 truncate">
-              {userContext.practice_goals?.length > 0 &&
-                `· 重点练: ${userContext.practice_goals.join('/')}`}
+              {practiceGoals.length > 0 &&
+                `· 重点练: ${practiceGoals.join('/')}`}
               {userContext.difficulty && ` · 难度: ${userContext.difficulty}`}
             </span>
           )}
@@ -463,11 +453,11 @@ const PracticeChatPage = () => {
             onVoiceEnd={sendVoiceEnd}
             onAudioChunk={sendAudioChunk}
             onStopPlayback={handleStopPlayback}
-            onPlayAudio={audioStream.playStoredAudio}
+            onPlayAudio={playStoredAudio}
             isDisabled={currentSession?.status === 'completed'}
             isSending={isSending}
             isConnected={isConnected}
-            isPlayingAudio={audioStream.isPlaying}
+            isPlayingAudio={isPlayingAudio}
           />
         </div>
         {/* OR-4: Real-time SPIN Stage Hint Sidebar */}

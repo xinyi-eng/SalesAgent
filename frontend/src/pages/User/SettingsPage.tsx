@@ -13,6 +13,7 @@
 import { useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
 import authApi from '../../api/auth'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 const SettingsPage = () => {
   const { user } = useAuth()
@@ -60,8 +61,8 @@ const SettingsPage = () => {
       setNewPassword('')
       setConfirmPassword('')
       alert('账号设置已保存')
-    } catch (err: any) {
-      setAccountError(err?.response?.data?.detail || err?.message || '保存失败')
+    } catch (err: unknown) {
+      setAccountError(getErrorMessage(err, '保存失败'))
     } finally {
       setAccountSaving(false)
     }
@@ -190,12 +191,16 @@ const SettingsPage = () => {
                   </div>
                 </div>
 
+                {accountError && (
+                  <p className="text-sm text-red-600">{accountError}</p>
+                )}
                 <div className="flex justify-end">
                   <button
                     onClick={handleSaveAccount}
-                    className="px-6 py-2 bg-primary text-white rounded-lg hover:bg-primary/90"
+                    disabled={accountSaving}
+                    className="px-6 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50"
                   >
-                    保存修改
+                    {accountSaving ? '保存中...' : '保存修改'}
                   </button>
                 </div>
               </div>

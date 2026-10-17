@@ -4,7 +4,7 @@ PDF Parser - Extract text from PDF documents
 import os
 from typing import List, Optional, Dict
 from pathlib import Path
-import PyPDF2
+from pypdf import PdfReader
 
 
 class PDFParser:
@@ -40,7 +40,7 @@ class PDFParser:
 
         try:
             with open(file_path, 'rb') as f:
-                reader = PyPDF2.PdfReader(f)
+                reader = PdfReader(f)
 
                 result["page_count"] = len(reader.pages)
                 result["metadata"] = {

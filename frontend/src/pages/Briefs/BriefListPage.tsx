@@ -9,9 +9,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import api, {
-  BriefSubscription, BriefSubscriptionsUpdate, BriefSummary,
+  BriefSubscription, BriefSummary,
   INDUSTRY_OPTIONS,
 } from '../../api/briefs'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 type Tab = 'today' | 'history' | 'subs'
 
@@ -21,7 +22,6 @@ const BriefListPage = () => {
   const [briefs, setBriefs] = useState<BriefSummary[]>([])
   const [todayByIndustry, setTodayByIndustry] = useState<Record<string, BriefSummary[]>>({})
   const [todayDate, setTodayDate] = useState<string>('')
-  const [subscriptions, setSubscriptions] = useState<BriefSubscription[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -51,10 +51,9 @@ const BriefListPage = () => {
       setBriefs(hist)
       setTodayByIndustry(today.industries || {})
       setTodayDate(today.date || '')
-      setSubscriptions(subs.subscriptions || [])
       setSubsDraft(subs.subscriptions || [])
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '加载简报失败')
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, '加载简报失败'))
     } finally {
       setIsLoading(false)
     }
@@ -73,9 +72,8 @@ const BriefListPage = () => {
         keywords: keywords.trim() || undefined,
       })
       navigate(`/briefs/${detail.id}`)
-    } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || '生成失败'
-      setGenerateError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    } catch (e: unknown) {
+      setGenerateError(getErrorMessage(e, '生成失败'))
     } finally {
       setIsGenerating(false)
     }
@@ -86,8 +84,8 @@ const BriefListPage = () => {
     try {
       await api.refreshBriefs()
       await loadAll()
-    } catch (e: any) {
-      alert('刷新失败：' + (e?.response?.data?.detail || e?.message))
+    } catch (e: unknown) {
+      alert('刷新失败：' + getErrorMessage(e, '未知错误'))
     } finally {
       setIsRefreshing(false)
     }
@@ -111,10 +109,10 @@ const BriefListPage = () => {
     setSubsMsg(null)
     try {
       const result = await api.updateSubscriptions({ subscriptions: subsDraft })
-      setSubscriptions(result.subscriptions)
+      setSubsDraft(result.subscriptions)
       setSubsMsg('✅ 已保存。每日 8:30 后台会自动抓取最新新闻。')
-    } catch (e: any) {
-      setSubsMsg('❌ 保存失败：' + (e?.response?.data?.detail || e?.message))
+    } catch (e: unknown) {
+      setSubsMsg('❌ 保存失败：' + getErrorMessage(e, '未知错误'))
     } finally {
       setSubsSaving(false)
     }
@@ -125,8 +123,8 @@ const BriefListPage = () => {
     try {
       await api.deleteBrief(id)
       setBriefs((prev) => prev.filter((b) => b.id !== id))
-    } catch (e: any) {
-      alert(`删除失败：${e?.message || 'unknown'}`)
+    } catch (e: unknown) {
+      alert(`删除失败：${getErrorMessage(e, 'unknown')}`)
     }
   }
 

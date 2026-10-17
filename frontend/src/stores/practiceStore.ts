@@ -2,7 +2,7 @@
  * Practice Store - Zustand state management for practice sessions
  */
 import { create } from 'zustand'
-import api, { Scenario, RoleConfig } from '../api/practice'
+import api, { PracticeSessionContext, RoleConfig, Scenario } from '../api/practice'
 
 // Message type
 interface MessageItem {
@@ -69,11 +69,7 @@ interface PracticeState {
   fetchScenarios: () => Promise<void>
   selectScenario: (scenario: Scenario | null) => void
   setRoleConfig: (config: RoleConfig | null) => void
-  startSession: (spinContext?: {
-    customerContext?: any
-    investigationResult?: any
-    userContext?: any
-  }) => Promise<void>
+  startSession: (spinContext?: PracticeSessionContext) => Promise<void>
   endSession: () => Promise<void>
   resetSession: () => void
 
@@ -145,11 +141,7 @@ export const usePracticeStore = create<PracticeState>()(
     set({ selectedRoleConfig: config })
   },
 
-  startSession: async (spinContext?: {
-    customerContext?: any
-    investigationResult?: any
-    userContext?: any
-  }) => {
+  startSession: async (spinContext?: PracticeSessionContext) => {
     const { selectedScenario, selectedRoleConfig } = get()
     if (!selectedScenario || !selectedRoleConfig) {
       set({ scenarioError: '请先选择场景和角色配置' })

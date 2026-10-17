@@ -12,6 +12,7 @@
 import { useState, useEffect } from 'react'
 import api from '../../api/knowledge'
 import type { KnowledgeStats, KnowledgeDocument, SearchResult, SpinQuestions } from '../../api/knowledge'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 const KnowledgeBasePage = () => {
   const [activeTab, setActiveTab] = useState('search')
@@ -52,10 +53,10 @@ const KnowledgeBasePage = () => {
       ])
       setDocuments(docsData || [])
       setStats(statsData)
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Failed to load knowledge base data:', error)
       setLoadError(
-        error?.response?.data?.detail || error?.message || '加载知识库失败'
+        getErrorMessage(error, '加载知识库失败')
       )
       setDocuments([])
       setStats(null)
@@ -78,11 +79,11 @@ const KnowledgeBasePage = () => {
     try {
       const response = await api.search(searchQuery, 5)
       setSearchResults(response.results || [])
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Search failed:', error)
       setSearchResults([])  // 失败时不返回任何伪造结果
       setSearchError(
-        error?.response?.data?.detail || error?.message || '搜索失败'
+        getErrorMessage(error, '搜索失败')
       )
     } finally {
       setIsSearching(false)
@@ -96,9 +97,9 @@ const KnowledgeBasePage = () => {
       // Reload data after ingest
       await loadData()
       alert(`知识库更新完成！共处理 ${response.total} 个文档`)
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Ingest failed:', error)
-      alert('更新失败：' + (error?.response?.data?.detail || error?.message || '未知错误'))
+      alert('更新失败：' + getErrorMessage(error, '未知错误'))
     } finally {
       setIsIngesting(false)
     }
@@ -120,11 +121,11 @@ const KnowledgeBasePage = () => {
         pain_points: painPointsList
       })
       setSpinQuestions(response)
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('SPIN generation failed:', error)
       setSpinQuestions(null)
       setSpinError(
-        error?.response?.data?.detail || error?.message || 'SPIN 生成失败'
+        getErrorMessage(error, 'SPIN 生成失败')
       )
     } finally {
       setIsGeneratingSpin(false)

@@ -1,22 +1,35 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
-import { PracticePage, PracticeChatPage, PracticeReviewPage, ReportPage } from './pages/Practice'
-import {
-  ScenarioManagementPage,
-  AdminDashboardPage,
-  AuditManagementPage,
-  UserManagementPage,
-  DataExportPage,
-  SystemSettingsPage
-} from './pages/Admin'
-import { LoginPage, RegisterPage } from './pages/Auth'
-import { ProfilePage, HistoryPage, SettingsPage } from './pages/User'
-import { DashboardPage } from './pages/Dashboard'
-import { KnowledgeBasePage } from './pages/Knowledge'
-import { BriefListPage, BriefDetailPage } from './pages/Briefs'
-import SpinPreparationPage from './pages/Spin/SpinPreparationPage'
 import { AuthProvider } from './contexts/AuthContext'
 import ProtectedRoute from './components/common/ProtectedRoute'
 import AppLayout from './components/common/AppLayout'
+
+const LoginPage = lazy(() => import('./pages/Auth/LoginPage'))
+const RegisterPage = lazy(() => import('./pages/Auth/RegisterPage'))
+const DashboardPage = lazy(() => import('./pages/Dashboard/DashboardPage'))
+const SpinPreparationPage = lazy(() => import('./pages/Spin/SpinPreparationPage'))
+const PracticePage = lazy(() => import('./pages/Practice/PracticePage'))
+const PracticeChatPage = lazy(() => import('./pages/Practice/PracticeChatPage'))
+const PracticeReviewPage = lazy(() => import('./pages/Practice/PracticeReviewPage'))
+const ReportPage = lazy(() => import('./pages/Practice/ReportPage'))
+const ProfilePage = lazy(() => import('./pages/User/ProfilePage'))
+const HistoryPage = lazy(() => import('./pages/User/HistoryPage'))
+const SettingsPage = lazy(() => import('./pages/User/SettingsPage'))
+const KnowledgeBasePage = lazy(() => import('./pages/Knowledge/KnowledgeBasePage'))
+const BriefListPage = lazy(() => import('./pages/Briefs/BriefListPage'))
+const BriefDetailPage = lazy(() => import('./pages/Briefs/BriefDetailPage'))
+const ScenarioManagementPage = lazy(() => import('./pages/Admin/ScenarioManagementPage'))
+const AdminDashboardPage = lazy(() => import('./pages/Admin/AdminDashboardPage'))
+const AuditManagementPage = lazy(() => import('./pages/Admin/AuditManagementPage'))
+const UserManagementPage = lazy(() => import('./pages/Admin/UserManagementPage'))
+const DataExportPage = lazy(() => import('./pages/Admin/DataExportPage'))
+const SystemSettingsPage = lazy(() => import('./pages/Admin/SystemSettingsPage'))
+
+const PageLoading = () => (
+  <div className="min-h-screen flex items-center justify-center" role="status" aria-label="页面加载中">
+    <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
+  </div>
+)
 
 /**
  * Wrapper that every protected page goes through.
@@ -35,7 +48,8 @@ function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <Routes>
+        <Suspense fallback={<PageLoading />}>
+          <Routes>
           {/* Public routes — no global nav */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
@@ -110,7 +124,8 @@ function App() {
 
           {/* Default redirect */}
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </AuthProvider>
   )

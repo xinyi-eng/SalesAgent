@@ -46,6 +46,10 @@ _PARTIAL_BOUNDARY = re.compile(
 )
 _PARTIAL_MIN_CHARS = 25
 
+# 文本 UI 首字优先，后续小批量合并：避免逐 token 推送造成 WebSocket 刷新过频。
+_STREAM_UPDATE_MIN_CHARS = 8
+_STREAM_UPDATE_BOUNDARIES = frozenset("，,。！？!?；;：:")
+
 
 def split_sentences(buffer_text: str, allow_partial: bool = True) -> List[str]:
     """
@@ -183,7 +187,7 @@ class SentenceBuffer:
     def __init__(self):
         self._buf = ""
         self._in_think = False  # 是否在 <think> 块内
-        self._think_buf = ""    # 累积 think 内容用于检测结束
+        self._think_buf = ""    # 可能跨 token 的 <think> / </think> 标签前缀
 
     def push(self, token: str) -> List[str]:
         """
@@ -205,27 +209,39 @@ class SentenceBuffer:
     def _strip_think(self, token: str) -> str:
         """实时剥 <think>...</think> 块，处理跨 token 的边界"""
         out = ""
-        i = 0
-        while i < len(token):
+        text = self._think_buf + token
+        self._think_buf = ""
+        while text:
             if self._in_think:
                 # 找 </think>
-                end_idx = token.find("</think>", i)
+                end_idx = text.find("</think>")
                 if end_idx >= 0:
                     self._in_think = False
-                    i = end_idx + len("</think>")
+                    text = text[end_idx + len("</think>"):]
                 else:
-                    break  # 还在 think 块里，整个 token 都丢掉
+                    _, self._think_buf = self._split_tag_prefix(text, "</think>")
+                    break  # 还在 think 块里，保留可能跨 token 的关闭标签前缀
             else:
                 # 找 <think>
-                start_idx = token.find("<think>", i)
+                start_idx = text.find("<think>")
                 if start_idx >= 0:
-                    out += token[i:start_idx]
+                    out += text[:start_idx]
                     self._in_think = True
-                    i = start_idx + len("<think>")
+                    text = text[start_idx + len("<think>"):]
                 else:
-                    out += token[i:]
+                    visible, self._think_buf = self._split_tag_prefix(text, "<think>")
+                    out += visible
                     break
         return out
+
+    @staticmethod
+    def _split_tag_prefix(text: str, tag: str) -> tuple[str, str]:
+        """保留可能在下一个 token 补全的标签前缀，避免提前展示。"""
+        max_prefix = min(len(text), len(tag) - 1)
+        for size in range(max_prefix, 0, -1):
+            if text.endswith(tag[:size]):
+                return text[:-size], text[-size:]
+        return text, ""
 
     def flush(self) -> str:
         """
@@ -235,6 +251,11 @@ class SentenceBuffer:
         rest = self._buf
         self._buf = ""
         return rest.strip()
+
+    @property
+    def text(self) -> str:
+        """返回当前可安全展示的文本（已过滤流式 <think> 内容）。"""
+        return self._buf
 
     def reset(self):
         self._buf = ""
@@ -446,6 +467,7 @@ async def stream_pipeline(
     # 3. 流式 LLM + 句子切分
     buf = SentenceBuffer()
     full_text = ""
+    last_streamed_text = ""
     sentences_emitted: List[str] = []
     audio_chunks_emitted: List[bytes] = []
     tts_tasks: List[asyncio.Task] = []
@@ -506,13 +528,22 @@ async def stream_pipeline(
             full_text += token
             # 累积到 buf（不切句，等 LLM 完再切）
             buf.push(token)
-            # 实时推 streaming update（让前端看到 AI 正在"打字"）
-            # 用 strip 后的 full_text 作为可见内容
-            visible = strip_think_blocks(full_text) if False else full_text
-            if visible.strip() and (not sentences_emitted or sentences_emitted[-1] != visible):
-                # 第一句还没 fire 时不发 update（等真正 TTS 时一起发）
-                pass
-            # 实时把 visible text 推给前端（但 ai_streaming_update content 留空给 LLM 完才发）
+            # 首个可见 token 立刻发送以降低 TTFT；之后合并小片段或等标点，
+            # 让前端拿到的是可直接覆盖展示的累计文本。
+            visible = buf.text
+            token_ends_at_boundary = bool(token.rstrip()) and token.rstrip()[-1] in _STREAM_UPDATE_BOUNDARIES
+            if visible.strip() and visible != last_streamed_text and (
+                not last_streamed_text
+                or len(visible) - len(last_streamed_text) >= _STREAM_UPDATE_MIN_CHARS
+                or token_ends_at_boundary
+            ):
+                await websocket_send({
+                    "type": "ai_streaming_update",
+                    "id": msg_id,
+                    "content": visible,
+                    "timestamp": time.time(),
+                })
+                last_streamed_text = visible
         llm_streaming = False
         end_ms = int((time.time() - t0) * 1000)
         print(f"[STREAM][T={end_ms:>5}ms] ← LLM stream ended, total {token_count} tokens, first_token_at={first_token_at}ms, last_token_at={end_ms}ms")
@@ -531,13 +562,15 @@ async def stream_pipeline(
                 full_sentence = f"{tag} {full_sentence}"
             sentences_emitted.append(full_sentence)
             print(f"[STREAM][T={int((time.time()-t0)*1000):>5}ms] ✂ final sentence: {full_sentence[:60]!r} → fire TTS")
-            # 推 streaming update（一次性推完整文本给前端）
-            await websocket_send({
-                "type": "ai_streaming_update",
-                "id": msg_id,
-                "content": full_sentence,
-                "timestamp": time.time(),
-            })
+            # 结尾可能补了 TTS 标签或尚未达到推送阈值，此时补一次最终文本。
+            if full_sentence != last_streamed_text:
+                await websocket_send({
+                    "type": "ai_streaming_update",
+                    "id": msg_id,
+                    "content": full_sentence,
+                    "timestamp": time.time(),
+                })
+                last_streamed_text = full_sentence
             tts_tasks.append(asyncio.create_task(
                 sentence_to_audio_stream(
                     full_sentence, minimax, emotion, voice_modify,

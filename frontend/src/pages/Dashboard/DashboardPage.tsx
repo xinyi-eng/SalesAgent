@@ -12,6 +12,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api, { DashboardStats as DashboardStatsType, SessionListItem } from '../../api/practice'
+import { getErrorMessage } from '../../utils/errorMessage'
 
 const DashboardPage = () => {
   const navigate = useNavigate()
@@ -30,9 +31,9 @@ const DashboardPage = () => {
       ])
       setStats(statsRes)
       setRecentSessions(sessionsRes.data || [])
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to load dashboard:', err)
-      setError(err?.response?.data?.detail || err?.message || '加载失败')
+      setError(getErrorMessage(err, '加载失败'))
     } finally {
       setIsLoading(false)
     }

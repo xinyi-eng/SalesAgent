@@ -11,7 +11,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { usePracticeStore } from '../../stores/practiceStore'
 import { useSpinStore } from '../../stores/spinStore'
 import { useAuth } from '../../contexts/AuthContext'
-import { RoleConfig } from '../../api/practice'
+import { PracticeSessionContext, RoleConfig } from '../../api/practice'
 import ScenarioCard from '../../components/business/practice/ScenarioCard'
 import RoleSelector from '../../components/business/practice/RoleSelector'
 import PrePracticeForm, { UserContext } from '../../components/business/practice/PrePracticeForm'
@@ -50,7 +50,7 @@ const PracticePage = () => {
     if (selectedScenario && currentStep === 'select') {
       setCurrentStep('configure')
     }
-  }, [selectedScenario])
+  }, [selectedScenario, currentStep])
 
   // Navigate to chat page when session is ready
   useEffect(() => {
@@ -80,9 +80,9 @@ const PracticePage = () => {
     setStartError(null)
 
     try {
-      const spinState = location.state as { customerContext?: any; investigationResult?: any } | null
-      const customerContext = spinState?.customerContext || spinStore.customerContext
-      const investigationResult = spinState?.investigationResult || spinStore.investigationResult
+      const spinState = location.state as PracticeSessionContext | null
+      const customerContext = spinState?.customerContext ?? spinStore.customerContext ?? undefined
+      const investigationResult = spinState?.investigationResult ?? spinStore.investigationResult ?? undefined
 
       await startSession({ customerContext, investigationResult, userContext })
       setCurrentStep('ready')

@@ -204,7 +204,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         URL.revokeObjectURL(url)
       }
 
-      audioElementRef.current.onerror = (e) => {
+      audioElementRef.current.onerror = () => {
         console.error('[Replay] Audio error:', audioElementRef.current?.error)
         // Try as raw PCM if mp3 fails
         tryRawPCM(bytes)
@@ -223,7 +223,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     function tryRawPCM(decodedBytes: Uint8Array | null) {
       console.log('[Replay] Trying raw PCM playback...')
       try {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+        const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
         if (!AudioContextClass) {
           console.error('[Replay] No AudioContext')
           return
@@ -233,7 +233,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         const sampleRate = 32000
         const numChannels = 1
 
-        let bytesToUse = decodedBytes
+        const bytesToUse = decodedBytes
         if (!bytesToUse) {
           console.error('[Replay] No bytes available for PCM playback')
           return

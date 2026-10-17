@@ -35,8 +35,7 @@ function installAxiosAuthInterceptor(getToken: () => string | null) {
   axios.interceptors.request.use((config) => {
     const token = getToken()
     if (token) {
-      config.headers = config.headers || {}
-      ;(config.headers as any).Authorization = `Bearer ${token}`
+      config.headers.set('Authorization', `Bearer ${token}`)
     }
     return config
   })
@@ -70,10 +69,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     localStorage.removeItem(AUTH_STORAGE_KEY)
   }
 
-  const getAccessToken = (): string | null => {
+  const getAccessToken = useCallback((): string | null => {
     const stored = readStored()
     return stored?.token || null
-  }
+  }, [])
 
   // 初始化：装 axios 拦截器，从 localStorage 恢复登录态，
   // 如果有 token 就异步调 /auth/me 验证有效性
@@ -100,7 +99,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         clearStored()
         setAuthState({ user: null, isAuthenticated: false, isLoading: false })
       })
-  }, [])
+  }, [getAccessToken])
 
   const login = async (email: string, password: string) => {
     const res = await authApi.login({ email, password })
@@ -155,7 +154,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       clearStored()
       setAuthState({ user: null, isAuthenticated: false, isLoading: false })
     }
-  }, [])
+  }, [getAccessToken])
 
   return (
     <AuthContext.Provider
